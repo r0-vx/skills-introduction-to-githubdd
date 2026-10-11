@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
-import type { HandFreeSettings, HandGesture, PageNode, RuntimeStatus, TargetInfo } from '../shared/types';
+import type { HandFreeMessage, HandFreeSettings, HandGesture, HandPose, PageNode, RuntimeStatus, TargetInfo } from '../shared/types';
 import { DEFAULT_SETTINGS, DEFAULT_STATUS } from '../shared/types';
 import { Icon } from '../shared/icons';
-import { openDashboardInTab, sendMessage } from '../shared/runtime';
+import { openDashboardInTab, sendMessage, subscribeToRuntimeMessages } from '../shared/runtime';
 import { loadSettings, saveSettings, subscribeToSettings } from '../shared/storage';
 import { formatConfidence, normalizeRuntimeStatus } from '../shared/sessionState';
 import { answerPageQuery, extractPageIndex } from '../accessibility/pageExtractor';
@@ -13,6 +13,7 @@ import { DwellController } from '../content/dwellController';
 import { findTargetAt } from '../content/targetDetector';
 import { mapCameraToViewport, readCalibrationGeometry, type CoordinatePoint } from '../tracking/coordinateMapping';
 import { SpeechController, type SpeechStatus } from '../voice/speechController';
+import { FistScrollController, type FistScrollEvent } from '../tracking/fistScroll';
 
 function targetName(target?: TargetInfo | null): string {
   return target?.accessibleName?.trim() || 'Unnamed control';
@@ -150,6 +151,9 @@ export function DemoLab() {
   const [senseResult, setSenseResult] = useState<SenseResult | null>(null);
   const [senseState, setSenseState] = useState<'idle' | 'reading' | 'ready'>('idle');
   const [senseMessage, setSenseMessage] = useState('Choose a local Sense action to inspect the visible demo webpage.');
+  const [scrollMode, setScrollMode] = useState(false);
+  const [scrollDirection, setScrollDirection] = useState<'up' | 'down' | 'none'>('none');
+  const [scrollPosition, setScrollPosition] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const landmarkCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -157,6 +161,7 @@ export function DemoLab() {
   const fingertipRef = useRef<HTMLDivElement>(null);
   const targetOutlineRef = useRef<HTMLDivElement>(null);
   const sensePageRef = useRef<HTMLElement>(null);
+  const demoSurfaceRef = useRef<HTMLElement>(null);
   const senseUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const speechRef = useRef<SpeechController | null>(null);
   const voiceSessionRef = useRef(0);
@@ -178,6 +183,11 @@ export function DemoLab() {
   const handVisibleRef = useRef(false);
   const lastDwellUiAtRef = useRef(0);
   const cameraGenerationRef = useRef(0);
+  const fistScrollRef = useRef(new FistScrollController());
+  const scrollModeRef = useRef(false);
+  const scrollBlockUntilRef = useRef(0);
+  const scrollFrameRef = useRef<number | null>(null);
+  const pendingScrollRef = useRef(0);
 
   const publishStatus = useCallback((patch: Partial<RuntimeStatus>) => {
     pendingStatusRef.current = { ...pendingStatusRef.current, ...patch };
@@ -213,6 +223,96 @@ export function DemoLab() {
     }
   }, []);
 
+  function flushDemoScroll(): void {
+    scrollFrameRef.current = null;
+    const surface = demoSurfaceRef.current;
+    const delta = pendingScrollRef.current;
+    pendingScrollRef.current = 0;
+    if (!surface || Math.abs(delta) < 0.5 || !scrollModeRef.current) return;
+    surface.scrollBy({ top: delta, behavior: 'auto' });
+  }
+
+  function queueDemoScroll(deltaY: number): void {
+    pendingScrollRef.current = Math.max(-160, Math.min(160, pendingScrollRef.current + deltaY));
+    if (scrollFrameRef.current === null) scrollFrameRef.current = requestAnimationFrame(flushDemoScroll);
+  }
+
+  function beginDemoScroll(): void {
+    if (scrollModeRef.current) return;
+    scrollModeRef.current = true;
+    setScrollMode(true);
+    setScrollDirection('none');
+    dwellRef.current?.cancel('Scroll mode active');
+    updateHighlightedTarget(null);
+    setDwellProgress(0);
+    setFeedback('Scroll mode active. Move your fist up or down. Open your hand to stop.');
+  }
+
+  function endDemoScroll(reason: string, resetMachine = false): void {
+    const wasActive = scrollModeRef.current;
+    scrollModeRef.current = false;
+    if (resetMachine) fistScrollRef.current.reset();
+    pendingScrollRef.current = 0;
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = null;
+    scrollBlockUntilRef.current = performance.now() + Math.max(0, settingsRef.current.scrollCooldownDuration);
+    if (wasActive) {
+      setScrollMode(false);
+      setScrollDirection('none');
+      setFeedback(reason);
+      dwellRef.current?.cancel(reason);
+      updateHighlightedTarget(null);
+      setDwellProgress(0);
+    }
+  }
+
+  function handleFistScrollEvent(event: FistScrollEvent): void {
+    if (event.type === 'start') {
+      beginDemoScroll();
+      return;
+    }
+    if (event.type === 'update') {
+      if (!scrollModeRef.current) beginDemoScroll();
+      setScrollDirection(event.direction);
+      queueDemoScroll(event.deltaY);
+      return;
+    }
+    endDemoScroll(event.reason === 'tracking-lost' ? 'Tracking lost. Scroll mode stopped safely.' : 'Scroll mode stopped. Open hand or make a new fist when ready.');
+  }
+
+  function processFistScroll(position: { x: number; y: number; confidence: number }, pose: HandPose): void {
+    const events = fistScrollRef.current.update({ ...position, pose, now: performance.now() }, {
+      enabled: settingsRef.current.fistScrollEnabled && settingsRef.current.enabledModes.includes('hand'),
+      sensitivity: settingsRef.current.scrollSensitivity,
+      confirmationDuration: settingsRef.current.fistConfirmationDuration,
+      deadZone: settingsRef.current.scrollDeadZone,
+      maxScrollSpeed: settingsRef.current.maxScrollSpeed,
+      invertDirection: settingsRef.current.invertScroll,
+      cooldownDuration: settingsRef.current.scrollCooldownDuration
+    });
+    events.forEach(handleFistScrollEvent);
+  }
+
+  function handleRemoteScrollMessage(message: HandFreeMessage): void {
+    if (message.type === 'SCROLL_START') {
+      pointerTargetRef.current = clampPoint(message.position);
+      lastTrackingAtRef.current = performance.now();
+      lastConfidenceRef.current = message.position.confidence;
+      handVisibleRef.current = true;
+      beginDemoScroll();
+    }
+    if (message.type === 'SCROLL_UPDATE') {
+      pointerTargetRef.current = clampPoint(message.position);
+      lastTrackingAtRef.current = performance.now();
+      lastConfidenceRef.current = message.position.confidence;
+      handVisibleRef.current = true;
+      if (!scrollModeRef.current) beginDemoScroll();
+      setScrollDirection(message.direction);
+      queueDemoScroll(message.deltaY);
+    }
+    if (message.type === 'SCROLL_STOP') endDemoScroll(`Scroll mode stopped · ${message.reason}`);
+  }
+
   const persist = useCallback(async (patch: Partial<HandFreeSettings>) => {
     const next = { ...settingsRef.current, ...patch };
     if (trackerRef.current?.camera.currentStream) {
@@ -227,6 +327,7 @@ export function DemoLab() {
 
   const stopCamera = useCallback(async (silent = false) => {
     cameraGenerationRef.current += 1;
+    endDemoScroll('Camera stopped. Scroll mode reset safely.', true);
     const tracker = trackerRef.current;
     const video = videoRef.current;
     dwellRef.current?.cancel('Camera stopped');
@@ -322,6 +423,7 @@ export function DemoLab() {
     const shouldPause = !settingsRef.current.paused;
     if (shouldPause) {
       tracker.pause(video);
+      endDemoScroll('Demo paused. Scroll mode stopped safely.', true);
       dwellRef.current?.cancel('Demo paused');
       pointerTargetRef.current = null;
       handVisibleRef.current = false;
@@ -552,7 +654,8 @@ export function DemoLab() {
     const tracker = new SessionManager({
       onStatus: (patch) => {
         if (patch.handTracking === 'tracking') handVisibleRef.current = true;
-        if (patch.handTracking === 'lost' || patch.engineState === 'TRACKING_LOST' || patch.engineState === 'STOPPED' || patch.cameraState === 'stopped') {
+        if (patch.handTracking === 'lost' || (!settingsRef.current.enabledModes.includes('hand') && patch.engineState === 'TRACKING_LOST') || patch.engineState === 'STOPPED' || patch.cameraState === 'stopped') {
+          endDemoScroll('Tracking lost. Scroll mode stopped safely.', true);
           handVisibleRef.current = false;
           pointerTargetRef.current = null;
           dwellRef.current?.cancel('Tracking interrupted');
@@ -578,8 +681,9 @@ export function DemoLab() {
         lastConfidenceRef.current = sample.confidence;
         handVisibleRef.current = true;
       },
-      onHand: (_position, gesture) => {
+      onHand: (position, gesture, hand) => {
         setHandGesture((current) => current === gesture ? current : gesture);
+        processFistScroll(position, hand.pose);
       },
       onLandmarks: (frame) => {
         const video = videoRef.current;
@@ -614,6 +718,16 @@ export function DemoLab() {
       setSettings(effective);
       tracker.updateSettings(effective);
     });
+    const unsubscribeRuntime = subscribeToRuntimeMessages((message) => {
+      if (message.type === 'POINTER_UPDATE') {
+        pointerTargetRef.current = clampPoint(message.position);
+        lastTrackingAtRef.current = performance.now();
+        lastConfidenceRef.current = message.position.confidence;
+        handVisibleRef.current = true;
+      }
+      if (message.type === 'SCROLL_START' || message.type === 'SCROLL_UPDATE' || message.type === 'SCROLL_STOP') handleRemoteScrollMessage(message);
+      return undefined;
+    });
 
     return () => {
       active = false;
@@ -622,6 +736,9 @@ export function DemoLab() {
       statusTimerRef.current = null;
       if (visualFrameRef.current !== null) cancelAnimationFrame(visualFrameRef.current);
       visualFrameRef.current = null;
+      endDemoScroll('Demo closed. Scroll mode reset safely.', true);
+      if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+      scrollFrameRef.current = null;
       const video = videoRef.current;
       if (video && (tracker.camera.currentStream || tracker.camera.currentState !== 'stopped')) tracker.stop(video);
       tracker.clearConsumers();
@@ -633,6 +750,7 @@ export function DemoLab() {
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       senseUtteranceRef.current = null;
       unsubscribeSettings();
+      unsubscribeRuntime();
       trackerRef.current = null;
       dwellRef.current = null;
     };
@@ -645,6 +763,7 @@ export function DemoLab() {
       const fingertip = fingertipRef.current;
       const paused = settingsRef.current.paused || statusRef.current.engineState === 'PAUSED';
       const stale = now - lastTrackingAtRef.current > 360 || lastConfidenceRef.current < 0.5 || !handVisibleRef.current;
+      if (stale && scrollModeRef.current) endDemoScroll('Tracking lost. Scroll mode stopped safely.', true);
       if (paused || stale || !pointerTargetRef.current) {
         if (cursor) cursor.style.opacity = '0';
         if (fingertip) fingertip.style.opacity = '0';
@@ -669,19 +788,24 @@ export function DemoLab() {
           fingertip.style.top = `${y}px`;
           fingertip.style.opacity = String(settingsRef.current.touchViewCursorOpacity);
         }
-        const detected = findTargetAt(x, y);
-        const targetInChrome = detected?.element.closest('[data-handfree-chrome]');
-        const next = targetInChrome ? null : detected;
-        updateHighlightedTarget(next);
-        if (activeTargetRef.current && targetOutlineRef.current) {
-          const rect = activeTargetRef.current.getBoundingClientRect();
-          targetOutlineRef.current.style.left = `${rect.left}px`;
-          targetOutlineRef.current.style.top = `${rect.top}px`;
-          targetOutlineRef.current.style.width = `${rect.width}px`;
-          targetOutlineRef.current.style.height = `${rect.height}px`;
-          targetOutlineRef.current.style.opacity = String(settingsRef.current.touchViewHighlightOpacity);
+        if (scrollModeRef.current) {
+          updateHighlightedTarget(null);
+          dwellRef.current?.updateTarget(null, settingsRef.current.dwellDuration, false);
+        } else {
+          const detected = findTargetAt(x, y);
+          const targetInChrome = detected?.element.closest('[data-handfree-chrome]');
+          const next = targetInChrome ? null : detected;
+          updateHighlightedTarget(next);
+          if (activeTargetRef.current && targetOutlineRef.current) {
+            const rect = activeTargetRef.current.getBoundingClientRect();
+            targetOutlineRef.current.style.left = `${rect.left}px`;
+            targetOutlineRef.current.style.top = `${rect.top}px`;
+            targetOutlineRef.current.style.width = `${rect.width}px`;
+            targetOutlineRef.current.style.height = `${rect.height}px`;
+            targetOutlineRef.current.style.opacity = String(settingsRef.current.touchViewHighlightOpacity);
+          }
+          dwellRef.current?.updateTarget(next, settingsRef.current.dwellDuration, settingsRef.current.dwellEnabled && !paused && now >= scrollBlockUntilRef.current && lastConfidenceRef.current >= 0.5);
         }
-        dwellRef.current?.updateTarget(next, settingsRef.current.dwellDuration, settingsRef.current.dwellEnabled && !paused && lastConfidenceRef.current >= 0.5);
       }
       visualFrameRef.current = requestAnimationFrame(loop);
     };
@@ -738,7 +862,7 @@ export function DemoLab() {
     <div className="demo-camera-tint" aria-hidden="true" />
     <canvas ref={landmarkCanvasRef} className="demo-landmarks" aria-hidden="true" />
 
-    <section className="demo-page-surface" aria-labelledby="demo-page-title" style={{ opacity: settings.touchViewWebsiteOpacity }}>
+    <section ref={demoSurfaceRef} className="demo-page-surface" aria-labelledby="demo-page-title" onScroll={(event) => { const surface = event.currentTarget; const max = Math.max(0, surface.scrollHeight - surface.clientHeight); setScrollPosition(max ? surface.scrollTop / max : 0); }} style={{ opacity: settings.touchViewWebsiteOpacity }}>
       <header className="demo-page-header">
         <div><span className="demo-page-kicker">Interactive webpage</span><h1 id="demo-page-title">Access settings</h1><p>A small real webpage surface for testing pointer movement, target highlighting and dwell activation.</p></div>
         <button id="demo-primary" type="button" className="demo-page-button demo-page-button--primary" onClick={() => { setFormResult('Primary action activated.'); setFeedback('Primary action activated.'); }}>Activate primary action</button>
@@ -775,6 +899,14 @@ export function DemoLab() {
         </article>
       </div>
       <section className="demo-scroll-panel" aria-label="Demo notes"><span className="demo-page-kicker">What to look for</span><p>The green outline marks the current real target. The ring fills while the pointer remains steady. Pause cancels activation immediately and stopping the camera removes all tracking layers.</p></section>
+
+      <section id="demo-scroll-lab" className="demo-scroll-lab" aria-labelledby="demo-scroll-heading">
+        <header className="demo-scroll-lab__header"><div><span className="demo-page-kicker">Hand gesture scrolling</span><h2 id="demo-scroll-heading">Move through a longer page.</h2><p>Hold a steady fist, then slide it vertically. Move up to scroll up, move down to scroll down, and open your hand to stop.</p></div><span className={`demo-scroll-state${scrollMode ? ' is-active' : ''}`} role="status">{scrollMode ? scrollDirection === 'up' ? '↑ Scrolling up' : scrollDirection === 'down' ? '↓ Scrolling down' : 'Scroll mode active' : 'Ready'}</span></header>
+        <div className="demo-scroll-meter" role="progressbar" aria-label="Demo page scroll position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(scrollPosition * 100)}><span style={{ width: `${Math.max(4, Math.round(scrollPosition * 100))}%` }} /></div>
+        <div className="demo-scroll-meta"><span>Scroll position</span><strong>{Math.round(scrollPosition * 100)}%</strong><small>{scrollMode ? 'Open hand to stop scrolling.' : 'Make a fist to enter scroll mode.'}</small></div>
+        <div className="demo-scroll-grid"><article><span>01 · Prepare</span><h3>Keep the fist stable.</h3><p>HandFree waits for a short confirmation window so an open palm, pointing hand or noisy landmark frame cannot start scrolling by accident.</p></article><article><span>02 · Move</span><h3>Slide vertically.</h3><p>Small movements inside the dead zone are ignored. Larger movement is smoothed, capped and sent through the same TouchView page route.</p></article><article><span>03 · Release</span><h3>Open your hand to stop.</h3><p>Scroll mode cancels on hand loss, pause, exit or an opened hand. Pinch and dwell remain protected while the mode is active.</p></article></div>
+        <div className="demo-scroll-list" aria-label="Scrollable practice notes">{['Accessible forms benefit from predictable movement.', 'Long reading pages should keep the current position visible.', 'A controlled gesture can replace repeated wheel or trackpad movement.', 'Use the same calibration and camera session across the demo and supported tabs.'].map((item, index) => <article key={item}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></article>)}</div>
+      </section>
 
       <section className="demo-sense-demo" aria-labelledby="sense-demo-heading">
         <header className="demo-sense-heading">
@@ -830,11 +962,11 @@ export function DemoLab() {
 
     <section className="demo-instructions" data-handfree-chrome="true" aria-label="Demo instructions">
       <span className="demo-instruction-icon"><Icon name="target" /></span>
-      <div><strong>Move your index finger over a control.</strong><p>Keep it still until the dwell ring completes. The control activates automatically.</p></div>
-      <span className="demo-gesture-state">Gesture · {handGesture === 'open-palm' ? 'Open hand' : handGesture === 'pinch' ? 'Pinch' : 'Released'}</span>
+      <div><strong>{scrollMode ? 'Scroll mode active.' : 'Move your index finger over a control.'}</strong><p>{scrollMode ? 'Move your fist up or down. Open your hand to stop scrolling.' : 'Keep it still until the dwell ring completes, or make a stable fist to scroll.'}</p></div>
+      <span className="demo-gesture-state">{scrollMode ? scrollDirection === 'up' ? '↑ Upward' : scrollDirection === 'down' ? '↓ Downward' : 'Scroll mode' : `Gesture · ${handGesture === 'open-palm' ? 'Open hand' : handGesture === 'pinch' ? 'Pinch' : 'Released'}`}</span>
     </section>
 
-    <section className="demo-action-panel" data-handfree-chrome="true" aria-live="polite"><span className="demo-action-panel__eyebrow">Live feedback</span><strong>{feedback}</strong><div className="demo-action-panel__progress"><span style={{ width: `${Math.round(dwellProgress * 100)}%` }} /></div><small>Hand confidence · {formatConfidence(status.handConfidence)}</small></section>
+    <section className={`demo-action-panel${scrollMode ? ' demo-action-panel--scrolling' : ''}`} data-handfree-chrome="true" aria-live="polite"><span className="demo-action-panel__eyebrow">{scrollMode ? 'Scroll mode active' : 'Live feedback'}</span><strong>{feedback}</strong><div className="demo-action-panel__progress"><span style={{ width: `${Math.round(dwellProgress * 100)}%` }} /></div><small>{scrollMode ? `${scrollDirection === 'up' ? 'Moving upward' : scrollDirection === 'down' ? 'Moving downward' : 'Hold fist steady'} · Open hand to stop` : `Hand confidence · ${formatConfidence(status.handConfidence)}`}</small></section>
 
     <div className="demo-camera-control" data-handfree-chrome="true"><button className="demo-primary-control" type="button" onClick={() => void startCamera()} disabled={cameraBusy || status.cameraState === 'active'}><Icon name="camera" />{cameraBusy ? 'Starting camera…' : status.cameraState === 'active' ? 'Camera running' : 'Start camera'}</button><span className="demo-camera-message">{cameraMessage}{cameraCode && <code>{cameraCode}</code>}</span></div>
 
@@ -842,7 +974,7 @@ export function DemoLab() {
       <div className="demo-drawer-header"><div><span className="demo-page-kicker">Workspace settings</span><h2 id="demo-settings-title">Tune the live stage</h2></div><button className="demo-icon-button" type="button" aria-label="Close Demo settings" onClick={() => setSettingsOpen(false)}>×</button></div>
       <p className="demo-drawer-copy">The camera, landmarks, pointer and webpage are separate layers. Changes apply to this Demo Lab and are saved locally.</p>
       <div className="demo-drawer-actions"><button className="demo-page-button demo-page-button--primary" type="button" onClick={() => void startCamera()} disabled={cameraBusy || status.cameraState === 'active'}>Start camera</button><button className="demo-page-button" type="button" onClick={() => void stopCamera()} disabled={status.cameraState === 'stopped'}>Stop camera</button><button className="demo-page-button" type="button" onClick={() => void openCalibration()}>Start calibration</button></div>
-      <div className="demo-settings-list"><SettingRange id="demo-camera-opacity" label="Camera opacity" value={settings.touchViewCameraOpacity} min={0.15} max={1} step={0.05} suffix={`${Math.round(settings.touchViewCameraOpacity * 100)}%`} onChange={(value) => void persist({ touchViewCameraOpacity: value })} /><SettingRange id="demo-webpage-opacity" label="Webpage opacity" value={settings.touchViewWebsiteOpacity} min={0.45} max={1} step={0.05} suffix={`${Math.round(settings.touchViewWebsiteOpacity * 100)}%`} onChange={(value) => void persist({ touchViewWebsiteOpacity: value })} /><SettingRange id="demo-cursor-size" label="Cursor size" value={settings.touchViewCursorSize} min={18} max={56} step={2} suffix={`${settings.touchViewCursorSize}px`} onChange={(value) => void persist({ touchViewCursorSize: value })} /><SettingRange id="demo-dwell-duration" label="Dwell duration" value={settings.dwellDuration} min={500} max={2500} step={100} suffix={`${settings.dwellDuration}ms`} onChange={(value) => void persist({ dwellDuration: value })} /><SettingRange id="demo-smoothing" label="Pointer smoothing" value={settings.smoothing} min={0.2} max={0.92} step={0.04} suffix={`${Math.round(settings.smoothing * 100)}%`} onChange={(value) => void persist({ smoothing: value })} /><SettingSwitch label="Dwell activation" checked={settings.dwellEnabled} onChange={(value) => void persist({ dwellEnabled: value })} /><SettingSwitch label="Mirror camera" checked={settings.mirrorCamera} onChange={(value) => void persist({ mirrorCamera: value, touchViewMirrorCamera: value })} /><SettingSwitch label="High contrast" checked={settings.touchViewContrast} onChange={(value) => void persist({ touchViewContrast: value })} /></div>
+      <div className="demo-settings-list"><SettingRange id="demo-camera-opacity" label="Camera opacity" value={settings.touchViewCameraOpacity} min={0.15} max={1} step={0.05} suffix={`${Math.round(settings.touchViewCameraOpacity * 100)}%`} onChange={(value) => void persist({ touchViewCameraOpacity: value })} /><SettingRange id="demo-webpage-opacity" label="Webpage opacity" value={settings.touchViewWebsiteOpacity} min={0.45} max={1} step={0.05} suffix={`${Math.round(settings.touchViewWebsiteOpacity * 100)}%`} onChange={(value) => void persist({ touchViewWebsiteOpacity: value })} /><SettingRange id="demo-cursor-size" label="Cursor size" value={settings.touchViewCursorSize} min={18} max={56} step={2} suffix={`${settings.touchViewCursorSize}px`} onChange={(value) => void persist({ touchViewCursorSize: value })} /><SettingRange id="demo-dwell-duration" label="Dwell duration" value={settings.dwellDuration} min={500} max={2500} step={100} suffix={`${settings.dwellDuration}ms`} onChange={(value) => void persist({ dwellDuration: value })} /><SettingRange id="demo-smoothing" label="Pointer smoothing" value={settings.smoothing} min={0.2} max={0.92} step={0.04} suffix={`${Math.round(settings.smoothing * 100)}%`} onChange={(value) => void persist({ smoothing: value })} /><SettingRange id="demo-scroll-sensitivity" label="Scroll sensitivity" value={settings.scrollSensitivity} min={0.4} max={2} step={0.1} suffix={`${settings.scrollSensitivity.toFixed(1)}x`} onChange={(value) => void persist({ scrollSensitivity: value })} /><SettingRange id="demo-fist-confirmation" label="Fist confirmation" value={settings.fistConfirmationDuration} min={200} max={1000} step={50} suffix={`${settings.fistConfirmationDuration}ms`} onChange={(value) => void persist({ fistConfirmationDuration: value })} /><SettingRange id="demo-scroll-dead-zone" label="Vertical dead zone" value={settings.scrollDeadZone} min={0.01} max={0.12} step={0.005} suffix={`${Math.round(settings.scrollDeadZone * 100)}%`} onChange={(value) => void persist({ scrollDeadZone: value })} /><SettingRange id="demo-max-scroll-speed" label="Maximum scroll speed" value={settings.maxScrollSpeed} min={8} max={80} step={2} suffix={`${settings.maxScrollSpeed}px`} onChange={(value) => void persist({ maxScrollSpeed: value })} /><SettingRange id="demo-scroll-cooldown" label="Scroll cooldown" value={settings.scrollCooldownDuration} min={200} max={1500} step={50} suffix={`${settings.scrollCooldownDuration}ms`} onChange={(value) => void persist({ scrollCooldownDuration: value })} /><SettingSwitch label="Fist scrolling" checked={settings.fistScrollEnabled} onChange={(value) => void persist({ fistScrollEnabled: value })} /><SettingSwitch label="Invert scroll direction" checked={settings.invertScroll} onChange={(value) => void persist({ invertScroll: value })} /><SettingSwitch label="Dwell activation" checked={settings.dwellEnabled} onChange={(value) => void persist({ dwellEnabled: value })} /><SettingSwitch label="Mirror camera" checked={settings.mirrorCamera} onChange={(value) => void persist({ mirrorCamera: value, touchViewMirrorCamera: value })} /><SettingSwitch label="High contrast" checked={settings.touchViewContrast} onChange={(value) => void persist({ touchViewContrast: value })} /></div>
       <div className="demo-calibration-status"><span>Shared calibration</span><strong>{settings.calibration ? `${calibrationLabel} · ${new Date(settings.calibration.createdAt).toLocaleString()}` : 'Not saved. The fallback map is available for Demo testing.'}</strong><div><button type="button" className="demo-text-button" onClick={() => void persist({ calibration: null, touchViewCalibration: null })}>Reset calibration</button><button type="button" className="demo-text-button" onClick={() => void openCalibration()}>Recalibrate</button></div></div>
       <button className="demo-exit-button" type="button" onClick={() => void exitDemo()}>Exit Demo Lab and return to dashboard</button>
     </aside></>}

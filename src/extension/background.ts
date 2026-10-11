@@ -234,7 +234,7 @@ function isInternalPracticeMessage(url: string | undefined, message: HandFreeMes
   const page = url?.split(/[?#]/)[0];
   // These pages own their practice UI. This is not extension-page injection.
   return (page === chrome.runtime.getURL('demo.html') || page === chrome.runtime.getURL('touchview.html'))
-    && ['VOICE_COMMAND', 'DICTATION_TEXT', 'FOCUS_FIELD', 'SENSE_QUERY', 'PAGE_STRUCTURE_REQUEST'].includes(message.type);
+    && ['VOICE_COMMAND', 'DICTATION_TEXT', 'FOCUS_FIELD', 'SENSE_QUERY', 'PAGE_STRUCTURE_REQUEST', 'SCROLL_START', 'SCROLL_UPDATE', 'SCROLL_STOP'].includes(message.type);
 }
 
 async function activeTab(): Promise<chrome.tabs.Tab | undefined> {
@@ -463,6 +463,24 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
       if (![message.position.x, message.position.y, message.position.confidence].every(Number.isFinite)) return undefined;
       // Dashboard owns calibration and camera capture; preserve both payloads.
       await sendToTab(message, tab.id);
+      return undefined;
+    }
+    case 'SCROLL_START':
+    case 'SCROLL_UPDATE':
+    case 'SCROLL_STOP': {
+      if (!settings.touchViewEnabled || settings.paused || settings.touchViewPaused) return undefined;
+      // Keep extension-page practice surfaces on their own runtime bridge.
+      // `activeTab()` intentionally skips extension pages to find the webpage
+      // controlled by the dashboard, so using it here would send Demo Lab
+      // scrolling to an unrelated remembered HTTPS tab.
+      const [browserActive] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const tab = isInternalPracticeMessage(browserActive?.url, message) ? browserActive : await activeTab();
+      if (tab?.id === undefined) return undefined;
+      if (isInternalPracticeMessage(tab.url, message)) {
+        await sendToInternalPractice(message, tab);
+      } else if (touchViewTabs.has(tab.id)) {
+        await sendToTab(message, tab.id);
+      }
       return undefined;
     }
     case 'TARGET_UPDATE':

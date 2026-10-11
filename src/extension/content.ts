@@ -20,6 +20,9 @@ if (!scope.handfreeContentInstalled) {
         case 'PAUSE_TOUCHVIEW': case 'PAUSE_INTERACTION': overlay?.pause(true); break;
         case 'RESUME_TOUCHVIEW': case 'RESUME_INTERACTION': overlay?.pause(false); break;
         case 'POINTER_UPDATE': overlay?.cameraFrame(message.cameraFrame); overlay?.update(message.position, message.gesture); break;
+        case 'SCROLL_START': overlay?.startScroll(message.position); break;
+        case 'SCROLL_UPDATE': overlay?.updateScroll(message.position, message.deltaY, message.direction); break;
+        case 'SCROLL_STOP': overlay?.stopScroll(`Scroll mode stopped · ${message.reason}`); break;
         case 'TRACKING_STATUS':
           overlay?.trackingStatus(message.status);
           break;

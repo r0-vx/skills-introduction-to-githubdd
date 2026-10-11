@@ -3,7 +3,7 @@ import { AppShell, SectionHeading, StatusPill } from '../ui/AppShell';
 import { Icon } from '../shared/icons';
 import { loadSettings, saveSettings, subscribeToSettings } from '../shared/storage';
 import { extensionUrl, findSupportedWebpageTab, sendMessage } from '../shared/runtime';
-import { DEFAULT_SETTINGS, DEFAULT_STATUS, type CalibrationData, type CalibrationGeometry, type CameraConsumer, type HandFreeMessage, type HandFreeSettings, type HandPointerPosition, type PointerPosition, type RuntimeStatus } from '../shared/types';
+import { DEFAULT_SETTINGS, DEFAULT_STATUS, type CalibrationData, type CalibrationGeometry, type CameraConsumer, type HandFreeMessage, type HandFreeSettings, type HandPointerPosition, type HandPose, type PointerPosition, type RuntimeStatus } from '../shared/types';
 import { type TrackingCallbacks } from '../tracking/trackingController';
 import { SessionManager } from '../session/sessionManager';
 import { CALIBRATION_TARGETS, calibrationGeometryCompatible, mapCameraToViewport, mapCameraToViewportDebug, readCalibrationGeometry, type CoordinateMappingDebug, type CoordinatePoint } from '../tracking/coordinateMapping';
@@ -17,6 +17,7 @@ import { CalibrationValidation, CALIBRATION_TEST_LABELS, CALIBRATION_TEST_POINTS
 import '../ui/touchview-polish.css';
 import { diagnostic } from '../diagnostics/diagnostics';
 import { formatConfidence, normalizeRuntimeStatus, validConfidence } from '../shared/sessionState';
+import { FistScrollController, type FistScrollEvent } from '../tracking/fistScroll';
 
 const statusText: Record<RuntimeStatus['trackingPhase'], string> = { idle: 'Not started', 'camera-ready': 'Camera ready', 'loading-model': 'Loading face model', 'face-detected': 'Face detected', 'face-not-detected': 'Face not detected', tracking: 'Tracking', paused: 'Tracking paused', lost: 'Tracking lost', reinitializing: 'Reinitializing tracker', error: 'Tracking error' };
 
@@ -32,6 +33,7 @@ export function Dashboard() {
   const [cameraList, setCameraList] = useState<{ deviceId: string; label: string }[]>([]);
   const [selectedCamera, setSelectedCamera] = useState('');
   const [notice, setNotice] = useState('');
+  const [handPose, setHandPose] = useState<HandPose>('unknown');
   const [startingCamera, setStartingCamera] = useState(false);
   const [touchViewBusy, setTouchViewBusy] = useState(false);
   const cameraBusy = useRef(false);
@@ -83,6 +85,28 @@ export function Dashboard() {
   const pointerLastSent = useRef<{ x: number; y: number; confidence: number; gesture?: string; at: number } | null>(null);
   const pointerMessageCount = useRef(0);
   const pointerMessageWindow = useRef(performance.now());
+  const fistScroll = useRef(new FistScrollController());
+  const scrollActive = useRef(false);
+
+  function forwardScrollEvent(event: FistScrollEvent, position: HandPointerPosition): void {
+    if (event.type === 'start') {
+      scrollActive.current = true;
+      void sendMessage({ type: 'SCROLL_START', position });
+    } else if (event.type === 'update') {
+      void sendMessage({ type: 'SCROLL_UPDATE', position: { ...position, x: event.x, y: event.y }, deltaY: event.deltaY, direction: event.direction, velocity: event.velocity });
+    } else {
+      scrollActive.current = false;
+      void sendMessage({ type: 'SCROLL_STOP', reason: event.reason });
+    }
+  }
+
+  function resetFistScroll(reason: 'tracking-lost' | 'disabled' | 'reset' | 'paused' | 'exit' = 'reset'): void {
+    for (const event of fistScroll.current.reset()) forwardScrollEvent(event, { x: 0.5, y: 0.5, confidence: 0, source: 'hand-tracking' });
+    if (scrollActive.current) {
+      scrollActive.current = false;
+      void sendMessage({ type: 'SCROLL_STOP', reason });
+    }
+  }
 
   function flushTrackingStatus(): void {
     trackingStatusTimer.current = null;
@@ -198,6 +222,8 @@ export function Dashboard() {
         setNotice('Tracking lost. Interaction is paused until your face is detected and stabilized again.');
         void sendMessage({ type: 'PAUSE_INTERACTION', reason: 'Tracking lost' });
       }
+      if (partial.handTracking === 'lost' || partial.cameraState === 'paused' || partial.cameraState === 'stopped') setHandPose('unknown');
+      if (partial.handTracking === 'lost' || (!settingsRef.current.enabledModes.includes('hand') && partial.engineState === 'TRACKING_LOST') || partial.cameraState === 'paused' || partial.cameraState === 'stopped') resetFistScroll(partial.cameraState === 'paused' ? 'paused' : 'tracking-lost');
       if (partial.trackingPhase === 'tracking' && partial.faceDetected && lossPauseSent.current) {
         lossPauseSent.current = false;
         void sendMessage({ type: 'RESUME_INTERACTION' });
@@ -266,14 +292,21 @@ export function Dashboard() {
         }
       }
     },
-    onHand: (position, gesture) => {
+    onHand: (position, gesture, hand) => {
       if (calibrationStepRef.current !== 'idle' && calibrationStepRef.current !== 'complete') {
         // See onPointer: calibration consumes the raw hand coordinate in
         // onCoordinate so pinch smoothing/sensitivity cannot distort it.
+        resetFistScroll('reset');
         return;
       }
       if (settingsRef.current.enabledModes.includes('hand')) {
-        sendPointerUpdate(position, gesture);
+        setHandPose(hand.pose);
+        const frame = fistScroll.current.update({ pose: hand.pose, confidence: position.confidence, x: position.x, y: position.y, now: performance.now() }, { enabled: settingsRef.current.touchViewEnabled && settingsRef.current.fistScrollEnabled, sensitivity: settingsRef.current.scrollSensitivity, confirmationDuration: settingsRef.current.fistConfirmationDuration, deadZone: settingsRef.current.scrollDeadZone, maxScrollSpeed: settingsRef.current.maxScrollSpeed, invertDirection: settingsRef.current.invertScroll, cooldownDuration: settingsRef.current.scrollCooldownDuration });
+        for (const event of frame) forwardScrollEvent(event, position);
+        // A fist can scroll before calibration is available. Do not expose
+        // the fallback camera mapping as a precise click pointer until the
+        // saved calibration matches the current camera and viewport.
+        if (hand.calibrated) sendPointerUpdate(position, gesture);
       }
     },
     onLandmarks: (frame) => drawTrackingOverlay(overlayRef.current, { ...frame, faceOpacity: settingsRef.current.touchViewFaceOpacity, handOpacity: settingsRef.current.touchViewHandOpacity, geometry: videoRef.current ? geometryForVideo(videoRef.current) : undefined, mirrored: settingsRef.current.mirrorCamera })
@@ -356,6 +389,7 @@ export function Dashboard() {
     const closeCamera = () => {
       cameraGeneration.current += 1;
       invalidateValidation();
+      resetFistScroll('exit');
       tracker.clearConsumers();
       if (video && (cameraOwnership.current.owned || tracker.camera.currentStream)) tracker.destroy(video);
       if (!cameraBusy.current) cameraOwnership.current.release();
@@ -459,6 +493,7 @@ export function Dashboard() {
 
   function stopCamera() {
     lossPauseSent.current = false;
+    resetFistScroll('exit');
     if (calibrationStepRef.current !== 'idle' && calibrationStepRef.current !== 'complete') cancelCalibration();
     cameraGeneration.current += 1;
     // Stop is deliberately idempotent and does not depend on the Web Lock
@@ -479,6 +514,7 @@ export function Dashboard() {
     cameraOwnership.current.release();
     cameraThumbnail.current.reset();
     clearTrackingOverlay(overlayRef.current);
+    setHandPose('unknown');
     void sendMessage({ type: 'DISABLE_TOUCHVIEW' });
     void persist({ headControlEnabled: false, enabled: false, touchViewEnabled: false, touchViewPaused: false, paused: false });
     setNotice('Camera stopped. No camera stream remains active.');
@@ -510,6 +546,7 @@ export function Dashboard() {
     if (touchViewBusy) return;
     setTouchViewBusy(true);
     try {
+      if (!enabled) resetFistScroll('disabled');
       if (enabled && !await claimCamera()) return;
       const target = enabled ? await findSupportedWebpageTab() : undefined;
       if (enabled && target?.id === undefined) {
@@ -772,7 +809,7 @@ export function Dashboard() {
   const mappingFallbackText = mappingDebug ? `${mappingDebug.fallbackUsed ? 'yes' : 'no'}${mappingDebug.fallbackReason ? ` · ${mappingDebug.fallbackReason}` : ''}` : 'no';
   const targetPointText = calibrationTarget ? `${Math.round(calibrationTarget.x * 100)}%, ${Math.round(calibrationTarget.y * 100)}%` : 'none';
 
-  return <AppShell headerStatus={<><StatusPill label={settings.touchViewEnabled ? settings.touchViewPaused ? 'TouchView paused' : 'TouchView enabled' : 'TouchView off'} tone={settings.touchViewEnabled ? 'good' : 'neutral'} /><StatusPill label={status.currentTabSupported ? 'Page supported' : 'Page unsupported'} tone={status.currentTabSupported ? 'good' : 'warn'} /></>}>
+  return <AppShell headerStatus={<><StatusPill label={settings.touchViewEnabled ? settings.touchViewPaused ? 'TouchView paused' : 'TouchView enabled' : 'TouchView off'} tone={settings.touchViewEnabled ? 'good' : 'neutral'} /><StatusPill label={settings.enabledModes.includes('hand') ? `Hand ${handPose === 'fist' ? 'fist ready' : handPose === 'unknown' ? 'waiting' : handPose}` : 'Hand off'} tone={handPose === 'fist' ? 'good' : 'neutral'} /><StatusPill label={status.currentTabSupported ? 'Page supported' : 'Page unsupported'} tone={status.currentTabSupported ? 'good' : 'warn'} /></>}>
     <main className="dashboard-main">
       <section className="hero"><div><span className="eyebrow">TouchView control center</span><h1>Your hand. Your web.</h1><p>Enable TouchView, keep your hand in view, and calibrate once. Point to a webpage control and pinch or hold to select it.</p></div><div className="status-strip"><StatusPill label={settings.enabled ? 'HandFree on' : 'HandFree off'} tone={settings.enabled ? 'good' : 'neutral'} /><StatusPill label={phase} tone={trackingTone} /></div></section>
       {status.error && <div className="error-banner" role="alert"><Icon name="warning" /><span><strong>{status.diagnostic?.title ?? 'HandFree needs attention'}</strong><span>{status.diagnostic?.explanation ?? status.error}</span>{status.diagnostic?.recovery && <small>{status.diagnostic.recovery}</small>}</span></div>}

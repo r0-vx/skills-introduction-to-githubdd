@@ -22,6 +22,8 @@ export type ControlMode = 'head' | 'hand' | 'voice' | 'dictation' | 'sense' | 't
 export type MicrophoneState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'active' | 'stopped' | 'unavailable';
 export type VoiceState = 'unavailable' | 'idle' | 'listening' | 'processing' | 'speaking' | 'error';
 export type HandGesture = 'pinch' | 'open-palm' | 'release' | 'none';
+export type HandPose = 'fist' | 'open-palm' | 'pointing' | 'pinch' | 'unknown';
+export type ScrollDirection = 'up' | 'down' | 'none';
 
 export type DiagnosticCode =
   | 'CAMERA_PERMISSION_DENIED' | 'CAMERA_NOT_FOUND' | 'CAMERA_ALREADY_IN_USE' | 'CAMERA_STREAM_FAILED'
@@ -160,6 +162,13 @@ export interface HandFreeSettings {
   touchViewMirrorCamera: boolean;
   touchViewStableHoldEnabled: boolean;
   touchViewCalibration: TouchViewCalibration | null;
+  fistScrollEnabled: boolean;
+  scrollSensitivity: number;
+  fistConfirmationDuration: number;
+  scrollDeadZone: number;
+  maxScrollSpeed: number;
+  invertScroll: boolean;
+  scrollCooldownDuration: number;
 }
 
 export interface RuntimeStatus {
@@ -212,6 +221,13 @@ export interface HandPointerPosition {
   source: 'hand-tracking';
 }
 
+export interface ScrollPosition {
+  x: number;
+  y: number;
+  confidence: number;
+  source: 'hand-tracking';
+}
+
 export interface TargetInfo {
   selectorHint: string;
   accessibleName: string;
@@ -251,6 +267,9 @@ export type HandFreeMessage =
   | { type: 'TARGET_UPDATE'; target: TargetInfo | null }
   | { type: 'ACTIVATION_REQUEST'; target: TargetInfo }
   | { type: 'ACTIVATION_RESULT'; success: boolean; method?: 'pinch' | 'stable-hold'; duration?: number }
+  | { type: 'SCROLL_START'; position: ScrollPosition }
+  | { type: 'SCROLL_UPDATE'; position: ScrollPosition; deltaY: number; direction: ScrollDirection; velocity: number }
+  | { type: 'SCROLL_STOP'; reason: 'released' | 'tracking-lost' | 'disabled' | 'reset' | 'paused' | 'exit' }
   | { type: 'CALIBRATION_UPDATED'; calibration: CalibrationData | null }
   | { type: 'CONTENT_SCRIPT_READY' }
   | { type: 'NEW_TAB_READY' }
@@ -333,7 +352,14 @@ export const DEFAULT_SETTINGS: HandFreeSettings = {
   mirrorCamera: true,
   touchViewMirrorCamera: true,
   touchViewStableHoldEnabled: true,
-  touchViewCalibration: null
+  touchViewCalibration: null,
+  fistScrollEnabled: true,
+  scrollSensitivity: 1,
+  fistConfirmationDuration: 350,
+  scrollDeadZone: 0.035,
+  maxScrollSpeed: 34,
+  invertScroll: false,
+  scrollCooldownDuration: 500
 };
 
 export const DEFAULT_STATUS: RuntimeStatus = {

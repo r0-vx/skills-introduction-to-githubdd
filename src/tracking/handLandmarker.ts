@@ -3,6 +3,7 @@ import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import type { HandGesture } from '../shared/types';
 import { trackingAssetPath, visionWasmPath } from './modelAssets';
 import { landmarkQuality } from './landmarkQuality';
+import { classifyHandPose, type HandPose } from './fistScroll';
 
 export interface HandSample { landmarks: NormalizedLandmark[]; confidence: number; }
 
@@ -39,7 +40,7 @@ export class HandLandmarkerAdapter {
 function distance(a: NormalizedLandmark, b: NormalizedLandmark): number { return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z); }
 function clamp(value: number, min = 0.02, max = 0.98): number { return Math.max(min, Math.min(max, value)); }
 
-export function interpretHand(sample: HandSample, pinchThreshold: number, handSensitivity = 1, previous?: HandPointerCoordinates, smoothing = .62): { x: number; y: number; gesture: HandGesture; confidence: number } {
+export function interpretHand(sample: HandSample, pinchThreshold: number, handSensitivity = 1, previous?: HandPointerCoordinates, smoothing = .62): { x: number; y: number; gesture: HandGesture; confidence: number; pose: HandPose; isFist: boolean } {
   const tip = sample.landmarks[8];
   const thumb = sample.landmarks[4];
   // A palm-relative distance avoids changing the gesture threshold as the
@@ -49,11 +50,12 @@ export function interpretHand(sample: HandSample, pinchThreshold: number, handSe
   const wrist = sample.landmarks[0];
   const openFingers = [8, 12, 16, 20].filter((index) => distance(sample.landmarks[index], wrist) > distance(sample.landmarks[index - 2], wrist)).length;
   const gesture: HandGesture = pinchDistance < pinchThreshold ? 'pinch' : openFingers >= 4 ? 'open-palm' : 'release';
+  const pose = classifyHandPose(sample.landmarks, sample.confidence, pinchThreshold);
   // Keep the MediaPipe point in camera coordinates here. Mirror correction,
   // aspect-ratio correction, calibration, and viewport mapping are shared by
   // head mode, hand mode, TouchView, and the content-script bridge.
   const target = { x: clamp(tip.x), y: clamp(tip.y) };
-  if (!previous) return { ...target, gesture, confidence: sample.confidence };
+  if (!previous) return { ...target, gesture, confidence: sample.confidence, pose: pose.pose, isFist: pose.isFist };
   const blend = Math.max(.05, Math.min(.95, 1 - smoothing));
-  return { x: previous.x + (target.x - previous.x) * blend, y: previous.y + (target.y - previous.y) * blend, gesture, confidence: sample.confidence };
+  return { x: previous.x + (target.x - previous.x) * blend, y: previous.y + (target.y - previous.y) * blend, gesture, confidence: sample.confidence, pose: pose.pose, isFist: pose.isFist };
 }

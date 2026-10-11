@@ -19,7 +19,7 @@ try {
   const worker = browser.serviceWorkers()[0] || await browser.waitForEvent('serviceworker');
   const id = new URL(worker.url()).host;
   const page = await browser.newPage();
-  await browser.route('https://handfree-smoke.test/**', route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><title>HandFree HTTPS integration fixture</title><style>body{font:20px system-ui;padding:180px 100px}button{padding:24px;margin:20px}input,textarea{display:block;margin:20px}</style><h1>Browser interaction test</h1><button id="action" onclick="this.textContent='Activated '+(++window.clicks)">Activate real button</button><button id="other" onclick="this.textContent='Other '+(++window.otherClicks)">Second target</button><label>Name<input id="name"></label><label>Message<textarea id="message"></textarea></label><a href="/next">Navigate</a><script>window.clicks=0;window.otherClicks=0</script>` }));
+  await browser.route('https://handfree-smoke.test/**', route => route.fulfill({ contentType: 'text/html', body: `<!doctype html><title>HandFree HTTPS integration fixture</title><style>body{font:20px system-ui;padding:180px 100px;min-height:3600px}button{padding:24px;margin:20px}input,textarea{display:block;margin:20px}</style><h1>Browser interaction test</h1><button id="action" onclick="this.textContent='Activated '+(++window.clicks)">Activate real button</button><button id="other" onclick="this.textContent='Other '+(++window.otherClicks)">Second target</button><label>Name<input id="name"></label><label>Message<textarea id="message"></textarea></label><a href="/next">Navigate</a><script>window.clicks=0;window.otherClicks=0</script>` }));
   await page.goto('https://handfree-smoke.test/');
   const dashboard = await browser.newPage();
   await dashboard.goto(`chrome-extension://${id}/dashboard.html`);
@@ -52,8 +52,22 @@ try {
   const frame = (gesture = 'release', position = point) => send({ type: 'POINTER_UPDATE', position, gesture });
   await frame();
   check('pointer arrives and real target highlights', await page.locator('#handfree-touchview-root .outline').isVisible());
-  await frame('pinch');
-  for (let i = 0; i < 8; i++) { await new Promise(r => setTimeout(r, 100)); await frame('pinch'); }
+  const documentScrollBefore = await page.evaluate(() => window.scrollY);
+  await send({ type: 'SCROLL_START', position: point });
+  await send({ type: 'SCROLL_UPDATE', position: point, deltaY: 180, direction: 'down', velocity: 180 });
+  await page.waitForTimeout(120);
+  check('supported HTTPS page scrolls through the TouchView route', await page.evaluate(before => window.scrollY > before, documentScrollBefore));
+  await send({ type: 'SCROLL_STOP', reason: 'released' });
+  check('supported HTTPS page exits scroll mode cleanly', await page.locator('#handfree-touchview-root #scroll-status').getAttribute('data-active') === 'false');
+  // Scrolling changes the page-space position of the fixture button. Return
+  // to the known starting viewport before exercising activation so this check
+  // validates pinch routing rather than a stale screen coordinate.
+  await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: 'auto' }));
+  await page.waitForTimeout(80);
+  const pinchBox = await page.locator('#action').boundingBox();
+  const pinchPoint = { x: (pinchBox.x + pinchBox.width / 2) / 1280, y: (pinchBox.y + pinchBox.height / 2) / 900, confidence: .95, source: 'hand-tracking' };
+  await frame('pinch', pinchPoint);
+  for (let i = 0; i < 15; i++) { await new Promise(r => setTimeout(r, 100)); await frame('pinch', pinchPoint); }
   check('stable pinch activates real webpage button once', await page.evaluate(() => window.clicks) === 1);
   const other = await page.locator('#other').boundingBox();
   const otherPoint = { ...point, x: (other.x + other.width / 2) / 1280, y: (other.y + other.height / 2) / 900 };
@@ -161,10 +175,21 @@ try {
   await blocked.getByText('HandFree Demo').waitFor();
   check('Demo Lab opens as a standalone live workspace', new URL(blocked.url()).pathname.endsWith('/demo.html') && await blocked.getByText('HandFree Demo').count() === 1);
   check('Demo Lab owns a real webcam video surface', await blocked.locator('video.demo-camera').evaluate(video => video.autoplay && video.muted && video.playsInline && video.clientWidth > 0 && video.clientHeight > 0));
-  check('Demo Lab gives direct hand-pointer guidance', await blocked.getByText('Move your index finger over a control.').count() === 1 && await blocked.getByText('Keep it still until the dwell ring completes.').count() === 1);
+  check('Demo Lab gives direct hand-pointer guidance', await blocked.getByText('Move your index finger over a control.').count() === 1 && await blocked.getByText('Keep it still until the dwell ring completes, or make a stable fist to scroll.').count() === 1);
   const demoTopbarText = await blocked.locator('.demo-topbar').innerText();
   check('Demo Lab keeps the live workspace hand-only', !/face dots|face tracking|head tracking|face confidence/i.test(demoTopbarText));
   check('Demo Lab exposes hand landmark canvas only', await blocked.locator('canvas.demo-landmarks').count() === 1 && await blocked.locator('.demo-topbar').getByText('Hand tracking').count() === 1);
+  await blocked.bringToFront();
+  const demoSurface = blocked.locator('.demo-page-surface');
+  const demoScrollBefore = await demoSurface.evaluate(element => element.scrollTop);
+  await blocked.evaluate(() => chrome.runtime.sendMessage({ type: 'SCROLL_START', position: { x: .5, y: .5, confidence: .9, source: 'hand-tracking' } }));
+  await blocked.waitForTimeout(30);
+  await blocked.evaluate(() => chrome.runtime.sendMessage({ type: 'SCROLL_UPDATE', position: { x: .5, y: .5, confidence: .9, source: 'hand-tracking' }, deltaY: 180, direction: 'down', velocity: 180 }));
+  await blocked.waitForTimeout(120);
+  check('Demo Lab scroll section moves through the internal route', await demoSurface.evaluate((element, before) => element.scrollTop > before, demoScrollBefore));
+  await blocked.evaluate(() => chrome.runtime.sendMessage({ type: 'SCROLL_STOP', reason: 'released' }));
+  await blocked.waitForTimeout(30);
+  check('Demo Lab leaves scroll mode without blocking controls', await blocked.locator('.demo-scroll-state').textContent().then(text => text?.trim() === 'Ready'));
   check('Demo Lab exposes real webpage controls', await blocked.locator('#demo-primary').count() === 1 && await blocked.locator('#demo-secondary').count() === 1 && await blocked.locator('#demo-form').count() === 1 && await blocked.locator('#demo-submit').count() === 1);
   await blocked.locator('#demo-primary').click();
   check('Demo primary control performs a real local action', (await blocked.locator('#demo-result').innerText()).includes('Primary action activated'));

@@ -13,7 +13,7 @@ export interface TrackingCallbacks {
   onPointer: (position: ReturnType<HeadMapper['map']>) => void;
   onPosition: (position: RelativeHeadPosition) => void;
   onCoordinate: (sample: { source: 'head' | 'hand'; point: { x: number; y: number }; confidence: number }) => void;
-  onHand: (position: HandPointerPosition, gesture: ReturnType<typeof interpretHand>['gesture']) => void;
+  onHand: (position: HandPointerPosition, gesture: ReturnType<typeof interpretHand>['gesture'], hand: Pick<ReturnType<typeof interpretHand>, 'pose' | 'isFist'> & { calibrated: boolean }) => void;
   onLandmarks: (frame: { face: NormalizedLandmark[] | null; hand: NormalizedLandmark[] | null; headEnabled: boolean; handEnabled: boolean }) => void;
 }
 
@@ -304,10 +304,13 @@ export class TrackingController {
     const calibration = calibrationValid ? settings.calibration : null;
     if (settings.enabledModes.includes('head')) {
       if (!sample) {
-        this.engineState = 'TRACKING_LOST';
+        // A lost face must not put the shared engine into TRACKING_LOST when
+        // the hand source is still live. The hand path below owns hand-loss
+        // cancellation; keeping the engine RUNNING here preserves scrolling.
+        if (!handSample) this.engineState = 'TRACKING_LOST';
         this.lostFrames += 1;
         this.stableFrames = 0;
-        this.callbacks.onStatus({ trackingPhase: this.lostFrames > 12 ? 'lost' : 'face-not-detected', faceDetected: false, confidence: 0 });
+        this.callbacks.onStatus({ engineState: handSample ? 'RUNNING' : 'TRACKING_LOST', trackingPhase: this.lostFrames > 12 ? 'lost' : 'face-not-detected', faceDetected: false, confidence: 0 });
       } else {
         this.engineState = 'RUNNING';
         this.lostFrames = 0;
@@ -333,7 +336,16 @@ export class TrackingController {
         const mapped = mapCameraToViewport({ x: hand.x, y: hand.y }, calibration, geometry, settings.mirrorCamera);
         const handSensitivity = Math.max(0.65, Math.min(1.6, settings.handSensitivity));
         this.handStableFrames += 1;
-        if (calibrationValid && mapped && this.handStableFrames > 5) { this.pointerUpdates += 1; this.callbacks.onHand({ x: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.x - 0.5) * handSensitivity)), y: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.y - 0.5) * handSensitivity)), confidence: hand.confidence, source: 'hand-tracking' }, hand.gesture); }
+        // Fist scrolling is a gesture channel and does not need a saved
+        // calibration. Keep the normal pointer/click channel gated by a
+        // compatible calibration, but still emit stable hand frames when
+        // TouchView scrolling is enabled. `mapped` intentionally falls back
+        // to corrected camera coordinates when calibration is unavailable.
+        const canEmitHandFrame = calibrationValid || (settings.touchViewEnabled && settings.fistScrollEnabled);
+        if (canEmitHandFrame && mapped && this.handStableFrames > 5) {
+          this.pointerUpdates += 1;
+          this.callbacks.onHand({ x: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.x - 0.5) * handSensitivity)), y: Math.max(0.01, Math.min(0.99, 0.5 + (mapped.y - 0.5) * handSensitivity)), confidence: hand.confidence, source: 'hand-tracking' }, hand.gesture, { pose: hand.pose, isFist: hand.isFist, calibrated: calibrationValid });
+        }
       }
     }
     this.emitPerformance(video, settings, performance.now());
