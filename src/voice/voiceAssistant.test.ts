@@ -73,4 +73,18 @@ describe('VoiceAssistantController', () => {
     expect(commands).toEqual(['scroll']);
     assistant.disable();
   });
+
+  it('lets guided conversation consume an ambiguous class transcript before global commands', async () => {
+    const conversation: string[] = [];
+    const commands: string[] = [];
+    const assistant = new VoiceAssistantController();
+    assistant.setPreferences({ feedbackEnabled: false });
+    assistant.setHandlers((_transcript, intent) => { commands.push(intent.type); }, null, (text) => { conversation.push(text); });
+    assistant.enable('conversation');
+    AssistantRecognition.instances[0].emit('sleep');
+    await Promise.resolve();
+    expect(conversation).toEqual(['sleep']);
+    expect(commands).toEqual([]);
+    assistant.disable();
+  });
 });

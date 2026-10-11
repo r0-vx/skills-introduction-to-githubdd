@@ -19,7 +19,7 @@ export interface VoiceAssistantSnapshot {
 
 export type VoiceCommandHandler = (transcript: string, intent: VoiceIntent) => void | Promise<void>;
 export type VoiceDictationHandler = (text: string) => void | Promise<void>;
-export type VoiceConversationHandler = (text: string) => void | Promise<void>;
+export type VoiceConversationHandler = (text: string) => boolean | void | Promise<boolean | void>;
 export type VoiceAssistantListener = (snapshot: VoiceAssistantSnapshot) => void;
 
 const HELP_MESSAGE = 'You can say: click, scroll, open, read, type, search, select, or send.';
@@ -59,7 +59,7 @@ export class VoiceAssistantController {
 
   constructor() {
     this.speech = new SpeechController({
-      onTranscript: (text, isFinal, mode) => this.handleTranscript(text, isFinal, mode),
+      onTranscript: (text, isFinal, mode) => { void this.handleTranscript(text, isFinal, mode); },
       onStatus: (status, message) => {
         this.snapshot = {
           ...this.snapshot,
@@ -164,7 +164,7 @@ export class VoiceAssistantController {
   repeat(): void { this.speech.repeat(this.speechRate, this.speechVolume); }
   announce(message: string, speak = false): void { this.setMessage(message, speak); }
 
-  private handleTranscript(text: string, isFinal: boolean, mode: RecognitionMode): void {
+  private async handleTranscript(text: string, isFinal: boolean, mode: RecognitionMode): Promise<void> {
     this.snapshot = {
       ...this.snapshot,
       currentTranscript: isFinal ? '' : text,
@@ -187,10 +187,23 @@ export class VoiceAssistantController {
     this.lastCommandAt = now;
     this.snapshot = { ...this.snapshot, history: [text, ...this.snapshot.history].slice(0, 12) };
 
+    // Guided surfaces need the current question's context before the generic
+    // command parser runs. For example, speech recognition can shorten
+    // "sleeper" to "sleep", which is a global command outside a booking flow.
+    // A conversation handler returns false only when the transcript should
+    // fall through to the generic command parser.
+    if (mode === 'conversation' && this.conversationHandler) {
+      const handled = await this.conversationHandler(text);
+      if (handled !== false) {
+        this.emit();
+        return;
+      }
+    }
+
     const intent = parseVoiceCommand(text);
     if (!intent) {
       if (mode === 'dictation') void this.dictationHandler?.(text);
-      else if (mode === 'conversation') void this.conversationHandler?.(text);
+      else if (mode === 'conversation') this.setMessage(`I did not understand “${text}”. Say help for examples.`, false);
       else this.setMessage(`I did not understand “${text}”. Say help for examples.`, false);
       return;
     }

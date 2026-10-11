@@ -111,9 +111,10 @@ export function parseRailwayGuidedAnswer(input: string, field: RailwayGuidedFiel
   }
   if (field === 'class') {
     if (/\b(?:general|open seating)\b/.test(value)) return { field, value: 'general' };
-    if (/\b(?:sleeper|sleeping berth)\b/.test(value)) return { field, value: 'sleeper' };
-    if (/\b(?:ac|ac chair|chair car|air conditioned)\b/.test(value)) return { field, value: 'ac-chair' };
+    if (/\b(?:sleeper|sleep|sleeping|sleeping berth)\s*(?:class|berth)?\b/.test(value)) return { field, value: 'sleeper' };
+    // Check the more specific First AC phrase before the generic AC match.
     if (/\b(?:first ac|first class|premium cabin)\b/.test(value)) return { field, value: 'first-ac' };
+    if (/\b(?:ac|ac chair|chair car|air conditioned|air-conditioned)\b/.test(value)) return { field, value: 'ac-chair' };
     return null;
   }
   if (field === 'contact') {

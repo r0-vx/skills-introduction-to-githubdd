@@ -16,6 +16,7 @@ import { answerPageQuery, extractPageIndex } from '../accessibility/pageExtracto
 import { drawTrackingOverlay, clearTrackingOverlay } from '../dashboard/trackingOverlay';
 import { recordAnalytics } from '../analytics/analytics';
 import type { TrackingCallbacks } from '../tracking/trackingController';
+import { parseVoiceCommand } from '../voice/commandParser';
 import {
   availableRailwayTrains,
   buildBookingReference,
@@ -654,11 +655,25 @@ export function RailwayBookingDemo() {
   const handleGuidedConversation = useCallback((text: string) => {
     const field = guidedFieldRef.current ?? guidedFieldForStep(stepRef.current);
     if (!field) {
+      const command = parseRailwayCommand(text);
+      if (command) {
+        voiceIntentRef.current(text, 'command');
+        return true;
+      }
+      if (parseVoiceCommand(text)) return false;
       announce('I am not waiting for an answer right now. Say start over or review booking.', true);
-      return;
+      return true;
     }
     const answer = parseRailwayGuidedAnswer(text, field);
     if (!answer) {
+      const command = parseRailwayCommand(text);
+      if (command) {
+        voiceIntentRef.current(text, 'command');
+        return true;
+      }
+      // Let global controls such as pause, resume and stop listening reach the
+      // shared assistant instead of being treated as a bad field value.
+      if (parseVoiceCommand(text)) return false;
       const prompt = field === 'from' || field === 'to'
         ? 'Please say a station, for example Pune Junction.'
         : field === 'date'
@@ -674,7 +689,7 @@ export function RailwayBookingDemo() {
                   : 'Say an accessibility note, or say none to skip it.';
       void recordAnalytics({ type: 'clarification-requested', timestamp: Date.now(), mode: 'voice', outcome: 'ambiguous', metadata: { field } });
       announce(`I heard “${text}”. ${prompt}`, true);
-      return;
+      return true;
     }
 
     void recordAnalytics({ type: 'voice-command-executed', timestamp: Date.now(), mode: 'voice', outcome: 'success', metadata: { command: `guided-${answer.field}` } });

@@ -28,5 +28,7 @@ describe('railway voice commands', () => {
     expect(parseRailwayGuidedAnswer('18 November 2026', 'date')).toEqual({ field: 'date', value: '2026-11-18' });
     expect(parseRailwayGuidedAnswer('I would like two passengers', 'passengers')).toEqual({ field: 'passengers', value: 2 });
     expect(parseRailwayGuidedAnswer('nine eight seven six five four three two one zero', 'contact')).toEqual({ field: 'contact', value: '9876543210' });
+    expect(parseRailwayGuidedAnswer('sleep', 'class')).toEqual({ field: 'class', value: 'sleeper' });
+    expect(parseRailwayGuidedAnswer('first AC', 'class')).toEqual({ field: 'class', value: 'first-ac' });
   });
 });

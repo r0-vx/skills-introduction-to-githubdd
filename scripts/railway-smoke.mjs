@@ -99,6 +99,12 @@ try {
   await page.evaluate(() => window.__handfreeEmitSpeech('station is Pune Junction'));
   await page.waitForTimeout(100);
   check('guided conversation maps natural station answers to the form', await page.locator('#railway-from').inputValue() === 'Mumbai Central' && await page.locator('#railway-to').inputValue() === 'Pune Junction');
+  for (const answer of ['tomorrow', 'one way', 'two passengers', 'sleep']) {
+    await page.evaluate((text) => window.__handfreeEmitSpeech(text), answer);
+    await page.waitForTimeout(120);
+  }
+  await page.getByRole('heading', { name: 'Available demo trains' }).waitFor();
+  check('guided conversation accepts the class answer and opens results', await page.locator('.railway-train-card').count() > 0 && await page.locator('#railway-class').inputValue() === 'sleeper');
   await page.getByRole('button', { name: 'Stop guided flow' }).click();
   check('guided conversation can return to command mode', await page.locator('.railway-voice-status').innerText().then((text) => text.includes('Voice commands')));
   await page.setViewportSize({ width: 390, height: 844 });
