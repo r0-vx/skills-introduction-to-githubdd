@@ -28,9 +28,22 @@ function executeIntent(intent: VoiceIntent): void {
       else result('No unique form review control is available.', false);
       break;
     }
-    case 'scroll': window.scrollBy({ top: intent.direction === 'down' ? window.innerHeight * .8 : -window.innerHeight * .8, behavior: 'smooth' }); result(`Scrolled ${intent.direction}.`); break;
+    case 'scroll': {
+      if (intent.direction === 'top') window.scrollTo({ top: 0, behavior: 'smooth' });
+      else if (intent.direction === 'bottom') window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });
+      else window.scrollBy({ top: intent.direction === 'down' || intent.direction === 'page-down' ? window.innerHeight * .8 : -window.innerHeight * .8, behavior: 'smooth' });
+      result(`Scrolled ${intent.direction.replace('page-', '')}.`);
+      break;
+    }
     case 'history': intent.direction === 'back' ? window.history.back() : window.history.forward(); result(`Going ${intent.direction}.`, true, false); break;
     case 'reload': window.location.reload(); break;
+    case 'read-screen': result(answerPageQuery(extractPageIndex(), 'page about')); break;
+    case 'read-links': result(answerPageQuery(extractPageIndex(), 'links')); break;
+    case 'read-buttons': result(answerPageQuery(extractPageIndex(), 'buttons')); break;
+    case 'read-form-fields': result(answerPageQuery(extractPageIndex(), 'form fields')); break;
+    case 'read-dates': result(answerPageQuery(extractPageIndex(), 'dates')); break;
+    case 'read-contact': result(answerPageQuery(extractPageIndex(), 'contact information')); break;
+    case 'read-query': result(answerPageQuery(extractPageIndex(), intent.query)); break;
     case 'new-tab': void sendMessage({ type: 'OPEN_NEW_TAB' }); result('Opening a new tab.', true, false); break;
     case 'pause': void sendMessage({ type: 'PAUSE_INTERACTION', reason: 'Voice command' }); result('Interaction paused.'); break;
     case 'resume': void sendMessage({ type: 'RESUME_INTERACTION' }); result('Interaction resumed.'); break;
@@ -38,6 +51,24 @@ function executeIntent(intent: VoiceIntent): void {
     case 'stop-reading': window.speechSynthesis?.cancel(); result('Reading stopped.', true, false); break;
     case 'repeat': speak(lastSpoken || 'There is nothing to repeat yet.'); result(lastSpoken || 'There is nothing to repeat yet.', Boolean(lastSpoken), false); break;
     case 'help': result('You can say scroll down, click a button, focus a field, pause, resume, recenter, read headings, or stop reading.'); break;
+    case 'check': {
+      const matches = interactiveMatches(intent.query).filter((element) => element instanceof HTMLInputElement && element.type === 'checkbox');
+      if (matches.length !== 1) result(matches.length > 1 ? 'I found multiple checkboxes. Please name one.' : 'I could not find that checkbox.', false);
+      else { const checkbox = matches[0] as HTMLInputElement; checkbox.checked = intent.checked; checkbox.dispatchEvent(new Event('change', { bubbles: true })); result(`${intent.checked ? 'Checked' : 'Unchecked'} ${nameOf(checkbox)}.`); }
+      break;
+    }
+    case 'select': {
+      const matches = interactiveMatches(intent.query).filter((element) => ['SELECT', 'INPUT'].includes(element.tagName));
+      if (matches.length !== 1) result(matches.length > 1 ? 'I found multiple matching fields.' : `I could not find ${intent.query}.`, false);
+      else { matches[0].focus(); result(`Selected ${nameOf(matches[0])}.`); }
+      break;
+    }
+    case 'move': {
+      const matches = interactiveMatches(intent.query);
+      if (matches.length !== 1) result(matches.length > 1 ? 'I found multiple matching controls.' : `I could not find ${intent.query}.`, false);
+      else { matches[0].scrollIntoView({ behavior: 'smooth', block: 'center' }); result(`Moved to ${nameOf(matches[0])}.`); }
+      break;
+    }
     case 'focus': {
       const matches = interactiveMatches(intent.query).filter((element) => ['INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName));
       if (matches.length !== 1) { result(matches.length > 1 ? `I found ${matches.length} matching fields. Please be more specific.` : `I could not find a field named ${intent.query}.`, false); break; }
@@ -46,6 +77,13 @@ function executeIntent(intent: VoiceIntent): void {
     case 'next-field': { const fields = Array.from(document.querySelectorAll<HTMLElement>('input,select,textarea')).filter((element) => !element.hidden && !(element as HTMLInputElement).disabled); const index = fields.indexOf(document.activeElement as HTMLElement); fields[(index + 1) % fields.length]?.focus(); result('Moved to the next field.'); break; }
     case 'previous-field': { const fields = Array.from(document.querySelectorAll<HTMLElement>('input,select,textarea')).filter((element) => !element.hidden && !(element as HTMLInputElement).disabled); const index = fields.indexOf(document.activeElement as HTMLElement); fields[(index - 1 + fields.length) % fields.length]?.focus(); result('Moved to the previous field.'); break; }
     case 'clear-field': { const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null; if (!active || !('value' in active)) result('No editable field is focused.', false); else { setFieldValue(active, ''); result('Field cleared.'); } break; }
+    case 'delete-last-word': { const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null; if (active && 'value' in active) { setFieldValue(active, active.value.replace(/\s*\S+\s*$/, '')); result('Deleted the last word.'); } else result('No editable field is focused.', false); break; }
+    case 'delete-last-sentence': { const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null; if (active && 'value' in active) { setFieldValue(active, active.value.replace(/[^.!?]*[.!?]?\s*$/, '')); result('Deleted the last sentence.'); } else result('No editable field is focused.', false); break; }
+    case 'punctuation': handleDictation(intent.value === 'full stop' ? '. ' : intent.value === 'comma' ? ', ' : '\n', true); break;
+    case 'dictate': handleDictation(intent.text ?? '', true); break;
+    case 'start-dictation': result('Dictation is ready. Focus an editable field and speak.', true, false); break;
+    case 'stop-dictation': result('Dictation stopped.', true, false); break;
+    case 'submit': { const matches = interactiveMatches().filter((element) => /submit|send|apply|save/i.test(nameOf(element))); if (matches.length === 1) { pendingTarget = matches[0]; result(`I found ${nameOf(matches[0])}. Say confirm to activate it.`); } else result('I could not find a unique send or submit control.', false); break; }
     case 'cancel': pendingTarget = null; void sendMessage({ type: 'CANCEL_DWELL' }); result('Cancelled.'); break;
     case 'confirm': {
       const dialogConfirm = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"] button')).filter(button => /confirm submission/i.test(nameOf(button)));

@@ -1,0 +1,45 @@
+.voice-assistant-control { display: grid; gap: 14px; margin-top: 16px; padding: 18px; border: 1px solid rgba(125, 211, 252, .28); border-radius: 18px; background: linear-gradient(135deg, rgba(18, 50, 73, .72), rgba(10, 25, 42, .88)); color: var(--text, #eef6ff); box-shadow: 0 16px 38px rgba(0, 0, 0, .16); }
+.voice-assistant-control--compact { padding: 14px; border-radius: 14px; }
+.voice-assistant-header, .voice-assistant-title-row, .voice-assistant-status, .voice-assistant-actions, .voice-assistant-option-actions { display: flex; align-items: center; }
+.voice-assistant-header { justify-content: space-between; gap: 16px; }
+.voice-assistant-title-row { gap: 10px; min-width: 0; }
+.voice-assistant-title-row h2 { margin: 2px 0 0; font-size: 18px; line-height: 1.1; }
+.voice-assistant-eyebrow { display: block; color: #7dd3fc; font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.voice-assistant-icon { display: grid; width: 38px; height: 38px; flex: 0 0 auto; place-items: center; border: 1px solid rgba(125, 211, 252, .35); border-radius: 12px; color: #7dd3fc; background: rgba(125, 211, 252, .1); }
+.voice-assistant-icon svg { width: 20px; height: 20px; }
+.voice-assistant-icon.is-live, .voice-assistant-dot.is-live { color: #4ade80; border-color: rgba(74, 222, 128, .45); }
+.voice-assistant-icon.is-warn, .voice-assistant-dot.is-warn { color: #fbbf24; border-color: rgba(251, 191, 36, .45); }
+.voice-assistant-icon.is-error, .voice-assistant-dot.is-error { color: #fb7185; border-color: rgba(251, 113, 133, .5); }
+.voice-assistant-switch { position: relative; width: 48px; height: 28px; flex: 0 0 auto; padding: 3px; border: 1px solid #42647b; border-radius: 999px; background: #102638; cursor: pointer; }
+.voice-assistant-switch span { display: block; width: 20px; height: 20px; border-radius: 50%; background: #9bb0c3; transition: transform .16s ease, background .16s ease; }
+.voice-assistant-switch[aria-checked="true"] { background: #0d749c; border-color: #7dd3fc; }
+.voice-assistant-switch[aria-checked="true"] span { transform: translateX(20px); background: #fff; }
+.voice-assistant-status { min-height: 30px; gap: 8px; color: #bdd0df; font-size: 13px; line-height: 1.4; }
+.voice-assistant-status strong { color: #f8fafc; }
+.voice-assistant-status span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.voice-assistant-dot { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #9bb0c3; box-shadow: 0 0 0 4px rgba(155, 176, 195, .12); }
+.voice-assistant-dot.is-live { background: #4ade80; box-shadow: 0 0 0 4px rgba(74, 222, 128, .14); }
+.voice-assistant-dot.is-warn { background: #fbbf24; box-shadow: 0 0 0 4px rgba(251, 191, 36, .14); }
+.voice-assistant-dot.is-error { background: #fb7185; box-shadow: 0 0 0 4px rgba(251, 113, 133, .14); }
+.voice-assistant-readout { display: grid; gap: 4px; padding: 10px 12px; border-left: 3px solid #38bdf8; background: rgba(4, 14, 25, .5); }
+.voice-assistant-readout span, .voice-assistant-readout small { color: #9bb0c3; font-size: 11px; }
+.voice-assistant-readout strong { overflow: hidden; color: #eef6ff; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.voice-assistant-actions { flex-wrap: wrap; gap: 8px; }
+.voice-assistant-actions .button, .voice-assistant-option-actions .button { min-height: 38px; }
+.voice-assistant-actions .button--conversation { border-color: rgba(196, 181, 253, .55); background: rgba(196, 181, 253, .12); color: #ede9fe; }
+.voice-assistant-actions .button--conversation[aria-pressed="true"] { border-color: #c4b5fd; background: rgba(196, 181, 253, .24); }
+.voice-assistant-options { border-top: 1px solid rgba(155, 176, 195, .18); padding-top: 11px; }
+.voice-assistant-options summary { color: #d9efff; cursor: pointer; font-size: 12px; font-weight: 700; }
+.voice-assistant-option-grid { display: grid; gap: 10px; margin-top: 12px; }
+.voice-assistant-option-grid label { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #bdd0df; font-size: 12px; }
+.voice-assistant-option-grid input[type="checkbox"] { width: 18px; height: 18px; accent-color: #38bdf8; }
+.voice-assistant-rate { display: grid !important; gap: 6px; justify-content: stretch !important; }
+.voice-assistant-rate span { display: flex; justify-content: space-between; }
+.voice-assistant-rate output { color: #7dd3fc; }
+.voice-assistant-rate input { width: 100%; accent-color: #38bdf8; }
+.voice-assistant-option-actions { flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.voice-assistant-note { margin: 0; color: #9fe8b3; font-size: 12px; }
+.voice-assistant-note--error { color: #fecdd3; }
+.voice-assistant-control button:focus-visible, .voice-assistant-control input:focus-visible, .voice-assistant-control summary:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+@media (max-width: 560px) { .voice-assistant-actions .button, .voice-assistant-option-actions .button { flex: 1 1 140px; } .voice-assistant-status { align-items: flex-start; } }
+@media (prefers-reduced-motion: reduce) { .voice-assistant-switch span { transition: none; } }

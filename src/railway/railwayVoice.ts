@@ -29,6 +29,15 @@ export type RailwayVoiceIntent =
   | { type: 'close-settings' }
   | { type: 'exit-blind-mode' };
 
+export type RailwayGuidedField = 'from' | 'to' | 'date' | 'journey' | 'passengers' | 'class' | 'passengerName' | 'contact' | 'passengerDetails';
+
+export type RailwayGuidedAnswer =
+  | { field: 'from' | 'to' | 'date' | 'passengerName' | 'passengerDetails'; value: string }
+  | { field: 'journey'; value: RailwayJourney }
+  | { field: 'passengers'; value: number }
+  | { field: 'class'; value: RailwayClass }
+  | { field: 'contact'; value: string };
+
 function clean(value: string): string {
   return value.toLowerCase().replace(/[.!?,]/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -47,7 +56,77 @@ function parseDate(value: string): string | null {
     const year = numeric[3] ?? String(today.getFullYear());
     return `${year}-${numeric[2].padStart(2, '0')}-${numeric[1].padStart(2, '0')}`;
   }
+  const named = value.match(/\b(\d{1,2})\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(20\d{2}))?\b/);
+  if (named) {
+    const months: Record<string, string> = { january: '01', february: '02', march: '03', april: '04', may: '05', june: '06', july: '07', august: '08', september: '09', october: '10', november: '11', december: '12' };
+    return `${named[3] ?? String(today.getFullYear())}-${months[named[2]]}-${named[1].padStart(2, '0')}`;
+  }
   return null;
+}
+
+function guidedStation(value: string): string | null {
+  const candidate = value
+    .replace(/^(?:the\s+)?(?:station|departure station|arrival station)\s+(?:is|will be|would be)\s+/i, '')
+    .replace(/^(?:i am|i'm)\s+(?:leaving|departing|travelling|traveling)\s+(?:from|to)\s+/i, '')
+    .replace(/^(?:from|to)\s+/i, '')
+    .trim();
+  return normalizeStation(candidate);
+}
+
+function guidedNumber(value: string): number | null {
+  const match = value.match(/\b(\d+|one|two|three|four|five|six|seven|eight|nine)\b/);
+  if (!match) return null;
+  const words: Record<string, number> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+  const result = words[match[1]] ?? Number(match[1]);
+  return Number.isFinite(result) ? Math.max(1, Math.min(9, result)) : null;
+}
+
+function guidedContact(value: string): string | null {
+  const words: Record<string, string> = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' };
+  const spoken = value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map((part) => words[part] ?? part).join('');
+  const digits = spoken.replace(/\D/g, '');
+  return digits.length >= 7 ? digits.slice(0, 15) : null;
+}
+
+/** Parse a natural answer against the question currently asked by guided mode. */
+export function parseRailwayGuidedAnswer(input: string, field: RailwayGuidedField): RailwayGuidedAnswer | null {
+  const value = clean(input);
+  if (!value) return null;
+  if (field === 'from' || field === 'to') {
+    const station = guidedStation(value);
+    return station ? { field, value: station } : null;
+  }
+  if (field === 'date') {
+    const date = parseDate(value);
+    return date ? { field, value: date } : null;
+  }
+  if (field === 'journey') {
+    if (/\b(?:one way|one-way|single)\b/.test(value)) return { field, value: 'one-way' };
+    if (/\b(?:return|round trip|round-trip)\b/.test(value)) return { field, value: 'return' };
+    return null;
+  }
+  if (field === 'passengers') {
+    const passengers = guidedNumber(value);
+    return passengers === null ? null : { field, value: passengers };
+  }
+  if (field === 'class') {
+    if (/\b(?:general|open seating)\b/.test(value)) return { field, value: 'general' };
+    if (/\b(?:sleeper|sleeping berth)\b/.test(value)) return { field, value: 'sleeper' };
+    if (/\b(?:ac|ac chair|chair car|air conditioned)\b/.test(value)) return { field, value: 'ac-chair' };
+    if (/\b(?:first ac|first class|premium cabin)\b/.test(value)) return { field, value: 'first-ac' };
+    return null;
+  }
+  if (field === 'contact') {
+    const contact = guidedContact(value);
+    return contact ? { field, value: contact } : null;
+  }
+  if (field === 'passengerName') {
+    const name = value.replace(/^(?:my|the)?\s*(?:passenger\s+)?name\s+(?:is|will be)\s+/i, '').trim();
+    return name ? { field, value: name.replace(/\b\w/g, (letter) => letter.toUpperCase()) } : null;
+  }
+  if (/^(?:skip|no note|nothing|none)$/.test(value)) return { field, value: '' };
+  const note = value.replace(/^(?:my|the)?\s*(?:accessibility|seating|travel)\s*(?:note|preference)\s+(?:is|will be)\s+/i, '').trim();
+  return note ? { field, value: note } : null;
 }
 
 export function parseRailwayCommand(input: string): RailwayVoiceIntent | null {

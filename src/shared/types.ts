@@ -20,7 +20,7 @@ export type PermissionState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'una
 
 export type ControlMode = 'head' | 'hand' | 'voice' | 'dictation' | 'sense' | 'touchview';
 export type MicrophoneState = 'unknown' | 'prompt' | 'granted' | 'denied' | 'active' | 'stopped' | 'unavailable';
-export type VoiceState = 'unavailable' | 'idle' | 'listening' | 'processing' | 'speaking' | 'error';
+export type VoiceState = 'unavailable' | 'idle' | 'listening' | 'restarting' | 'paused' | 'processing' | 'speaking' | 'error';
 export type HandGesture = 'pinch' | 'open-palm' | 'release' | 'none';
 export type HandPose = 'fist' | 'open-palm' | 'pointing' | 'pinch' | 'unknown';
 export type ScrollDirection = 'up' | 'down' | 'none';
@@ -141,6 +141,10 @@ export interface HandFreeSettings {
   voiceActivation: 'manual' | 'wake-word';
   speechRate: number;
   speechVolume: number;
+  voiceAssistantEnabled: boolean;
+  voiceAssistantPaused: boolean;
+  voiceFeedbackEnabled: boolean;
+  voiceWakePhraseEnabled: boolean;
   senseVerbosity: 'brief' | 'standard' | 'detailed';
   audioFirstMode: boolean;
   analyticsEnabled: boolean;
@@ -187,6 +191,10 @@ export interface RuntimeStatus {
   handConfidence: number;
   voice: VoiceState;
   voiceMessage?: string;
+  voiceAssistantEnabled: boolean;
+  voiceAssistantPaused: boolean;
+  lastVoiceTranscript?: string;
+  lastVoiceCommand?: string;
   diagnostic?: Diagnostic;
   cameraState: CameraSessionState;
   trackingState: TrackingSessionState;
@@ -293,7 +301,7 @@ export type HandFreeMessage =
   | { type: 'PERMISSION_STATUS'; permission: PermissionState; error?: string }
   | { type: 'ERROR_STATUS'; error: string; diagnostic?: Diagnostic }
   | { type: 'MIC_PERMISSION_STATUS'; microphone: MicrophoneState; error?: string }
-  | { type: 'VOICE_STATUS'; voice: VoiceState; message?: string }
+  | { type: 'VOICE_STATUS'; voice: VoiceState; message?: string; assistantEnabled?: boolean; assistantPaused?: boolean; transcript?: string; command?: string }
   | { type: 'VOICE_COMMAND'; transcript: string }
   | { type: 'VOICE_COMMAND_RESULT'; success: boolean; message: string; speak?: boolean }
   | { type: 'DICTATION_TEXT'; text: string; isFinal: boolean }
@@ -332,6 +340,10 @@ export const DEFAULT_SETTINGS: HandFreeSettings = {
   voiceActivation: 'manual',
   speechRate: 1,
   speechVolume: 1,
+  voiceAssistantEnabled: false,
+  voiceAssistantPaused: false,
+  voiceFeedbackEnabled: true,
+  voiceWakePhraseEnabled: false,
   senseVerbosity: 'standard',
   audioFirstMode: false,
   analyticsEnabled: true,
@@ -374,6 +386,8 @@ export const DEFAULT_STATUS: RuntimeStatus = {
   handTracking: 'idle',
   handConfidence: 0,
   voice: 'unavailable',
+  voiceAssistantEnabled: false,
+  voiceAssistantPaused: false,
   cameraState: 'idle',
   trackingState: 'idle',
   cameraOwner: 'none',

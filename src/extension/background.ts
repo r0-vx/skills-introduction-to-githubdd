@@ -5,6 +5,7 @@ import { diagnostic } from '../diagnostics/diagnostics';
 import { calibrationGeometryCompatible } from '../tracking/coordinateMapping';
 import { isControlTargetUrl, openDashboardInTab } from '../shared/runtime';
 import { normalizeRuntimeStatus } from '../shared/sessionState';
+import { parseVoiceCommand } from '../voice/commandParser';
 
 let settings: HandFreeSettings = { ...DEFAULT_SETTINGS };
 let status: RuntimeStatus = { ...DEFAULT_STATUS };
@@ -307,6 +308,77 @@ async function sendToInternalPractice(message: HandFreeMessage, tab: chrome.tabs
   try { return await chrome.runtime.sendMessage(message) as HandFreeMessage | undefined; } catch { return undefined; }
 }
 
+async function handleGlobalVoiceCommand(transcript: string, sender: chrome.runtime.MessageSender): Promise<HandFreeMessage | undefined> {
+  const intent = parseVoiceCommand(transcript);
+  if (!intent) return undefined;
+  const sourceTab = sender.tab ?? (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+  const openExtensionPage = async (path: string): Promise<void> => {
+    const url = chrome.runtime.getURL(path);
+    const existing = (await chrome.tabs.query({})).find((tab) => tab.id !== undefined && tab.url?.split(/[?#]/)[0] === url);
+    if (existing?.id !== undefined) {
+      await chrome.tabs.update(existing.id, { active: true });
+      await chrome.windows.update(existing.windowId, { focused: true });
+    } else {
+      await chrome.tabs.create({ url, active: true });
+    }
+  };
+  switch (intent.type) {
+    case 'open-dashboard':
+      await openDashboardInTab(sourceTab);
+      return { type: 'VOICE_COMMAND_RESULT', success: true, message: 'Opening the HandFree dashboard.', speak: true };
+    case 'open-demo':
+      await openExtensionPage('demo.html');
+      return { type: 'VOICE_COMMAND_RESULT', success: true, message: 'Opening the HandFree Demo Lab.', speak: true };
+    case 'open-touchview':
+      await openExtensionPage('touchview.html');
+      return { type: 'VOICE_COMMAND_RESULT', success: true, message: 'Opening TouchView.', speak: true };
+    case 'open-railway':
+      await openExtensionPage('railway.html');
+      return { type: 'VOICE_COMMAND_RESULT', success: true, message: 'Opening the Railway Booking Demo.', speak: true };
+    case 'open-settings':
+      await openDashboardInTab(sourceTab, 'settings');
+      return { type: 'VOICE_COMMAND_RESULT', success: true, message: 'Opening HandFree settings.', speak: true };
+    case 'next-tab':
+    case 'previous-tab': {
+      const tabs = (await chrome.tabs.query({ currentWindow: true })).filter((tab) => tab.id !== undefined);
+      const activeIndex = tabs.findIndex((tab) => tab.active);
+      if (activeIndex < 0 || tabs.length < 2) return { type: 'VOICE_COMMAND_RESULT', success: false, message: 'There is no other tab to switch to.', speak: true };
+      const offset = intent.type === 'next-tab' ? 1 : -1;
+      const next = tabs[(activeIndex + offset + tabs.length) % tabs.length];
+      if (next.id !== undefined) await chrome.tabs.update(next.id, { active: true });
+      return { type: 'VOICE_COMMAND_RESULT', success: true, message: `Switched to tab ${((activeIndex + offset + tabs.length) % tabs.length) + 1}.`, speak: false };
+    }
+    case 'touchview': {
+      if (intent.action === 'enable') return handleMessage({ type: 'ENABLE_TOUCHVIEW', tabId: sourceTab?.id }, sender);
+      if (intent.action === 'disable') return handleMessage({ type: 'DISABLE_TOUCHVIEW' }, sender);
+      if (intent.action === 'pause') return handleMessage({ type: 'PAUSE_TOUCHVIEW' }, sender);
+      if (intent.action === 'resume') return handleMessage({ type: 'RESUME_TOUCHVIEW' }, sender);
+      if (intent.action === 'recenter') return handleMessage({ type: 'RECENTER_POINTER' }, sender);
+      if (intent.action === 'dwell-on') return handleMessage({ type: 'UPDATE_SETTINGS', settings: { dwellEnabled: true } }, sender);
+      if (intent.action === 'dwell-off') return handleMessage({ type: 'UPDATE_SETTINGS', settings: { dwellEnabled: false } }, sender);
+      if (intent.action === 'set-dwell') return handleMessage({ type: 'UPDATE_SETTINGS', settings: { dwellDuration: Math.round((intent.value ?? 1) * 1000) } }, sender);
+      if (intent.action === 'sensitivity-up' || intent.action === 'sensitivity-down') {
+        const next = Math.max(.5, Math.min(1.8, settings.sensitivity + (intent.action === 'sensitivity-up' ? .1 : -.1)));
+        return handleMessage({ type: 'UPDATE_SETTINGS', settings: { sensitivity: Number(next.toFixed(1)) } }, sender);
+      }
+      if (intent.action === 'reset-calibration') return handleMessage({ type: 'CALIBRATION_UPDATED', calibration: null }, sender);
+      return undefined;
+    }
+    case 'camera': {
+      const settingsPatch: Partial<HandFreeSettings> = {};
+      if (intent.action === 'hand-on' || intent.action === 'hand-off') settingsPatch.enabledModes = intent.action === 'hand-on' ? Array.from(new Set([...settings.enabledModes, 'hand' as const])) : settings.enabledModes.filter((mode) => mode !== 'hand');
+      if (intent.action === 'head-on' || intent.action === 'head-off') { settingsPatch.headControlEnabled = intent.action === 'head-on'; settingsPatch.enabledModes = intent.action === 'head-on' ? Array.from(new Set([...settings.enabledModes, 'head' as const])) : settings.enabledModes.filter((mode) => mode !== 'head'); }
+      if (intent.action === 'fist-scroll-on' || intent.action === 'fist-scroll-off') settingsPatch.fistScrollEnabled = intent.action === 'fist-scroll-on';
+      if (intent.action === 'mirror-on' || intent.action === 'mirror-off') { settingsPatch.mirrorCamera = intent.action === 'mirror-on'; settingsPatch.touchViewMirrorCamera = intent.action === 'mirror-on'; }
+      if (intent.action === 'opacity-up' || intent.action === 'opacity-down') settingsPatch.touchViewCameraOpacity = Math.max(.15, Math.min(1, settings.touchViewCameraOpacity + (intent.action === 'opacity-up' ? .1 : -.1)));
+      if (Object.keys(settingsPatch).length > 0) return handleMessage({ type: 'UPDATE_SETTINGS', settings: settingsPatch }, sender);
+      return undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
 async function getActiveTabStatus(): Promise<HandFreeMessage> {
   const tab = await activeTab();
   const supported = Boolean(tab?.id !== undefined && (isHandFreeNewTabUrl(tab.url) || !isRestrictedUrl(tab.url)));
@@ -468,13 +540,17 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
     case 'SCROLL_START':
     case 'SCROLL_UPDATE':
     case 'SCROLL_STOP': {
-      if (!settings.touchViewEnabled || settings.paused || settings.touchViewPaused) return undefined;
       // Keep extension-page practice surfaces on their own runtime bridge.
       // `activeTab()` intentionally skips extension pages to find the webpage
       // controlled by the dashboard, so using it here would send Demo Lab
       // scrolling to an unrelated remembered HTTPS tab.
       const [browserActive] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      const tab = isInternalPracticeMessage(browserActive?.url, message) ? browserActive : await activeTab();
+      const internalPractice = isInternalPracticeMessage(browserActive?.url, message);
+      // Demo Lab and the standalone TouchView practice page own their local
+      // scroll surface. They must remain usable while their page-local hand
+      // engine is active even when the browser-tab overlay toggle is off.
+      if ((!internalPractice && !settings.touchViewEnabled) || settings.paused || settings.touchViewPaused) return undefined;
+      const tab = internalPractice ? browserActive : await activeTab();
       if (tab?.id === undefined) return undefined;
       if (isInternalPracticeMessage(tab.url, message)) {
         await sendToInternalPractice(message, tab);
@@ -512,6 +588,10 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
     case 'FOCUS_FIELD':
     case 'PAGE_STRUCTURE_REQUEST':
       {
+        if (message.type === 'VOICE_COMMAND') {
+          const globalResponse = await handleGlobalVoiceCommand(message.transcript, sender);
+          if (globalResponse) return globalResponse;
+        }
         const tab = await messageTarget(message);
         if (tab?.id !== undefined) {
           if (isInternalPracticeMessage(tab.url, message)) return await sendToInternalPractice(message, tab);
@@ -586,7 +666,14 @@ async function handleMessage(message: HandFreeMessage, sender: chrome.runtime.Me
       updateRuntimeStatus({ microphone: message.microphone, ...(message.error ? { error: message.error } : {}) });
       return undefined;
     case 'VOICE_STATUS':
-      updateRuntimeStatus({ voice: message.voice, voiceMessage: message.message });
+      updateRuntimeStatus({
+        voice: message.voice,
+        voiceMessage: message.message,
+        ...(message.assistantEnabled !== undefined ? { voiceAssistantEnabled: message.assistantEnabled } : {}),
+        ...(message.assistantPaused !== undefined ? { voiceAssistantPaused: message.assistantPaused } : {}),
+        ...(message.transcript !== undefined ? { lastVoiceTranscript: message.transcript } : {}),
+        ...(message.command !== undefined ? { lastVoiceCommand: message.command } : {})
+      });
       return undefined;
     case 'ANALYTICS_EVENT':
       if (settings.analyticsEnabled) await recordAnalytics(message.event);

@@ -27,6 +27,37 @@ try {
   const worker = browser.serviceWorkers()[0] || await browser.waitForEvent('serviceworker');
   const extensionId = new URL(worker.url()).host;
   const page = await browser.newPage();
+  await page.addInitScript(() => {
+    class MockSpeechRecognition {
+      static instances = [];
+      continuous = false;
+      interimResults = false;
+      lang = 'en-US';
+      onstart = null;
+      onresult = null;
+      onend = null;
+      onerror = null;
+      constructor() { MockSpeechRecognition.instances.push(this); }
+      start() { this.onstart?.(); }
+      stop() { this.onend?.(); }
+      abort() { this.onend?.(); }
+      emit(text) { this.onresult?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: text } }] }); }
+    }
+    window.SpeechRecognition = MockSpeechRecognition;
+    window.__handfreeEmitSpeech = (text) => MockSpeechRecognition.instances.at(-1)?.emit(text);
+    window.SpeechSynthesisUtterance = class {
+      rate = 1;
+      volume = 1;
+      onstart = null;
+      onend = null;
+      onerror = null;
+      constructor(text) { this.text = text; }
+    };
+    Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
+      cancel() {},
+      speak(utterance) { utterance.onstart?.(); setTimeout(() => utterance.onend?.(), 20); }
+    } });
+  });
   await page.goto(`chrome-extension://${extensionId}/railway.html`);
   await page.getByRole('heading', { name: 'Book a journey at your own pace.' }).waitFor();
   check('Railway Booking Demo loads in the extension', (await page.title()).includes('Railway Booking Demo'));
@@ -60,6 +91,16 @@ try {
   check('settings drawer closes cleanly', await page.getByRole('dialog', { name: 'Tune this demo' }).count() === 0);
 
   await page.getByRole('button', { name: 'Start another demo booking' }).click();
+  await page.getByRole('button', { name: 'Start guided flow' }).click();
+  await page.waitForTimeout(80);
+  check('guided conversation starts without leaving the Railway page', await page.locator('.railway-voice-status').innerText().then((text) => text.includes('Guided conversation')) && new URL(page.url()).pathname.endsWith('/railway.html'));
+  await page.evaluate(() => window.__handfreeEmitSpeech('from Mumbai Central'));
+  await page.waitForTimeout(100);
+  await page.evaluate(() => window.__handfreeEmitSpeech('station is Pune Junction'));
+  await page.waitForTimeout(100);
+  check('guided conversation maps natural station answers to the form', await page.locator('#railway-from').inputValue() === 'Mumbai Central' && await page.locator('#railway-to').inputValue() === 'Pune Junction');
+  await page.getByRole('button', { name: 'Stop guided flow' }).click();
+  check('guided conversation can return to command mode', await page.locator('.railway-voice-status').innerText().then((text) => text.includes('Voice commands')));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(80);
   const mobile = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));

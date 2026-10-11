@@ -2,14 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, ty
 import type { HandFreeSettings, HandGesture, HandPointerPosition, HandPose, RuntimeStatus, TargetInfo, PointerPosition } from '../shared/types';
 import { DEFAULT_SETTINGS, DEFAULT_STATUS } from '../shared/types';
 import { Icon } from '../shared/icons';
-import { extensionUrl } from '../shared/runtime';
+import { extensionUrl, subscribeToRuntimeMessages } from '../shared/runtime';
 import { loadSettings, saveSettings } from '../shared/storage';
 import { normalizeRuntimeStatus, formatConfidence } from '../shared/sessionState';
 import { SessionManager } from '../session/sessionManager';
 import { CameraOwnership } from '../dashboard/cameraOwnership';
 import { TouchViewEngine, type TouchViewEngineEvent } from '../touchview/touchViewEngine';
 import { FistScrollController, type FistScrollEvent } from '../tracking/fistScroll';
-import { SpeechController, type RecognitionMode, type SpeechStatus } from '../voice/speechController';
+import { getVoiceAssistant } from '../voice/voiceAssistant';
+import type { RecognitionMode, SpeechStatus } from '../voice/speechController';
+import { VoiceAssistantControl } from '../voice/VoiceAssistantControl';
 import { answerPageQuery, extractPageIndex } from '../accessibility/pageExtractor';
 import { drawTrackingOverlay, clearTrackingOverlay } from '../dashboard/trackingOverlay';
 import { recordAnalytics } from '../analytics/analytics';
@@ -30,7 +32,7 @@ import {
   type RailwayStep,
   type RailwayTrain
 } from './railwayData';
-import { parseRailwayCommand, railwayVoiceHelp, type RailwayVoiceIntent } from './railwayVoice';
+import { parseRailwayCommand, parseRailwayGuidedAnswer, railwayVoiceHelp, type RailwayGuidedField, type RailwayVoiceIntent } from './railwayVoice';
 
 type DictationField = 'from' | 'to' | 'passengerName' | 'passengerDetails' | 'contact';
 type SenseRead = 'page' | 'form' | 'results' | 'fare' | 'required' | 'confirmation';
@@ -73,7 +75,18 @@ function promptForStep(step: RailwayStep, form: RailwayForm): string {
 }
 
 function modeText(mode: RecognitionMode): string {
-  return mode === 'dictation' ? 'Dictation' : 'Voice commands';
+  return mode === 'dictation' ? 'Dictation' : mode === 'conversation' ? 'Guided conversation' : 'Voice commands';
+}
+
+function guidedFieldForStep(step: RailwayStep): RailwayGuidedField | null {
+  if (step === 'DEPARTURE') return 'from';
+  if (step === 'ARRIVAL') return 'to';
+  if (step === 'DATE') return 'date';
+  if (step === 'JOURNEY_TYPE') return 'journey';
+  if (step === 'PASSENGERS') return 'passengers';
+  if (step === 'CLASS') return 'class';
+  if (step === 'PASSENGER_DETAILS') return 'passengerName';
+  return null;
 }
 
 function SettingRange({ id, label, value, min, max, step, suffix, onChange }: { id: string; label: string; value: number; min: number; max: number; step: number; suffix: string; onChange: (value: number) => void }) {
@@ -139,7 +152,7 @@ export function RailwayBookingDemo() {
   const [dictationField, setDictationField] = useState<DictationField>('passengerName');
   const dictationFieldRef = useRef(dictationField);
   dictationFieldRef.current = dictationField;
-  const [dictationMode, setDictationMode] = useState(false);
+  const [voiceMode, setVoiceMode] = useState<RecognitionMode>('command');
   const [senseOutput, setSenseOutput] = useState('Choose a Sense action to read the visible booking page.');
   const [senseStatus, setSenseStatus] = useState<'ready' | 'reading'>('ready');
   const [scrollActive, setScrollActive] = useState(false);
@@ -151,11 +164,12 @@ export function RailwayBookingDemo() {
   const trackerRef = useRef<SessionManager | null>(null);
   const ownershipRef = useRef(new CameraOwnership());
   const touchEngineRef = useRef<TouchViewEngine | null>(null);
-  const speechRef = useRef<SpeechController | null>(null);
+  const speechRef = useRef(getVoiceAssistant().controller);
   const fistScrollRef = useRef(new FistScrollController());
   const searchTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
   const voiceIntentRef = useRef<(text: string, mode: RecognitionMode) => void>(() => undefined);
+  const guidedFieldRef = useRef<RailwayGuidedField | null>(null);
   const lastPointerUiAtRef = useRef(0);
   const lastTargetRef = useRef<TargetInfo | null>(null);
 
@@ -618,10 +632,90 @@ export function RailwayBookingDemo() {
   const startDictation = useCallback((field: DictationField) => {
     dictationFieldRef.current = field;
     setDictationField(field);
-    setDictationMode(true);
-    speechRef.current?.start('dictation');
+    getVoiceAssistant().setMode('dictation');
     setVoiceMessage(`Dictation started for ${field === 'passengerName' ? 'passenger name' : field === 'passengerDetails' ? 'passenger details' : field}. Say stop dictation when finished.`);
   }, []);
+
+  const startGuidedConversation = useCallback(() => {
+    const currentStep = stepRef.current;
+    if (currentStep === 'WELCOME' || currentStep === 'CONFIRMED') {
+      guidedFieldRef.current = 'from';
+      setFlowStep('DEPARTURE', true);
+      return;
+    }
+    guidedFieldRef.current = guidedFieldForStep(currentStep);
+    if (guidedFieldRef.current) {
+      announce(`Guided booking is ready. ${promptForStep(currentStep, formRef.current)}`, true);
+    } else {
+      announce('Guided booking is ready. Use the current page controls or say review booking.', true);
+    }
+  }, [announce, setFlowStep]);
+
+  const handleGuidedConversation = useCallback((text: string) => {
+    const field = guidedFieldRef.current ?? guidedFieldForStep(stepRef.current);
+    if (!field) {
+      announce('I am not waiting for an answer right now. Say start over or review booking.', true);
+      return;
+    }
+    const answer = parseRailwayGuidedAnswer(text, field);
+    if (!answer) {
+      const prompt = field === 'from' || field === 'to'
+        ? 'Please say a station, for example Pune Junction.'
+        : field === 'date'
+          ? 'Please say today, tomorrow, or a date such as 18 November 2026.'
+          : field === 'passengers'
+            ? 'Please say how many passengers, such as two passengers.'
+            : field === 'class'
+              ? 'Please say general, sleeper, AC chair, or first AC.'
+              : field === 'contact'
+                ? 'Please say a contact number.'
+                : field === 'passengerName'
+                  ? 'Please say the passenger name.'
+                  : 'Say an accessibility note, or say none to skip it.';
+      void recordAnalytics({ type: 'clarification-requested', timestamp: Date.now(), mode: 'voice', outcome: 'ambiguous', metadata: { field } });
+      announce(`I heard “${text}”. ${prompt}`, true);
+      return;
+    }
+
+    void recordAnalytics({ type: 'voice-command-executed', timestamp: Date.now(), mode: 'voice', outcome: 'success', metadata: { command: `guided-${answer.field}` } });
+    if (answer.field === 'from') {
+      updateForm({ from: answer.value });
+      guidedFieldRef.current = 'to';
+      setFlowStep('ARRIVAL', true);
+    } else if (answer.field === 'to') {
+      updateForm({ to: answer.value });
+      guidedFieldRef.current = 'date';
+      setFlowStep('DATE', true);
+    } else if (answer.field === 'date') {
+      updateForm({ date: answer.value });
+      guidedFieldRef.current = 'journey';
+      setFlowStep('JOURNEY_TYPE', true);
+    } else if (answer.field === 'journey') {
+      updateForm({ journey: answer.value });
+      guidedFieldRef.current = 'passengers';
+      setFlowStep('PASSENGERS', true);
+    } else if (answer.field === 'passengers') {
+      updateForm({ passengers: answer.value });
+      guidedFieldRef.current = 'class';
+      setFlowStep('CLASS', true);
+    } else if (answer.field === 'class') {
+      updateForm({ className: answer.value });
+      guidedFieldRef.current = null;
+      startSearch();
+    } else if (answer.field === 'passengerName') {
+      updateForm({ passengerName: answer.value });
+      guidedFieldRef.current = 'contact';
+      announce('Thanks. What contact number should I use for this local demo?', true);
+    } else if (answer.field === 'contact') {
+      updateForm({ contact: answer.value });
+      guidedFieldRef.current = 'passengerDetails';
+      announce('Any accessibility or seating note? Say none to skip this optional field.', true);
+    } else {
+      updateForm({ passengerDetails: answer.value });
+      guidedFieldRef.current = null;
+      announce('Passenger details captured. Say review booking when you are ready.', true);
+    }
+  }, [announce, setFlowStep, startSearch, updateForm]);
 
   const applyVoiceIntent = useCallback((intent: RailwayVoiceIntent) => {
     switch (intent.type) {
@@ -658,7 +752,7 @@ export function RailwayBookingDemo() {
       case 'pause': void togglePause(); return;
       case 'resume': if (pausedRef.current) void togglePause(); return;
       case 'close-settings': setSettingsOpen(false); return;
-      case 'exit-blind-mode': setBlindMode(false); blindRef.current = false; speechRef.current?.stop(); announce('Blind Mode is off. Visual controls are available again.', false); return;
+      case 'exit-blind-mode': setBlindMode(false); blindRef.current = false; getVoiceAssistant().disable(); announce('Blind Mode is off. Visual controls are available again.', false); return;
     }
   }, [announce, chooseTrain, clearBooking, confirmBooking, goBack, goNext, moveResultSelection, readSense, setFlowStep, startSearch, submitPassenger, togglePause, updateForm]);
 
@@ -668,8 +762,6 @@ export function RailwayBookingDemo() {
     if (mode === 'dictation') {
       const field = dictationFieldRef.current;
       updateForm({ [field]: text } as Partial<RailwayForm>);
-      setDictationMode(false);
-      speechRef.current?.stop();
       setVoiceMessage(`Dictation captured for ${field === 'passengerName' ? 'passenger name' : field}.`);
       return;
     }
@@ -683,20 +775,22 @@ export function RailwayBookingDemo() {
   };
 
   useEffect(() => {
-    const speech = new SpeechController({
-      onTranscript: (text, isFinal, mode) => {
-        if (isFinal) voiceIntentRef.current(text, mode);
-        else if (mode === 'dictation') setVoiceMessage(`Listening: ${text}`);
-      },
-      onStatus: (next, message) => {
-        setVoiceStatus(next);
-        if (message) setVoiceMessage(message);
-      }
+    const assistant = getVoiceAssistant();
+    speechRef.current = assistant.controller;
+    const stopAssistantUpdates = assistant.subscribe((snapshot) => {
+      setVoiceStatus(snapshot.status);
+      setVoiceMode(snapshot.mode);
+      if (snapshot.lastTranscript) setLastTranscript(snapshot.lastTranscript);
+      if (snapshot.message) setVoiceMessage(snapshot.message);
     });
-    speechRef.current = speech;
-    setVoiceStatus(speech.supported ? 'idle' : 'unavailable');
-    if (!speech.supported) setVoiceMessage('VOICE_RECOGNITION_UNAVAILABLE: this browser does not expose speech recognition. Keyboard input remains available.');
-    return () => { speech.destroy(); speechRef.current = null; };
+    const stopRuntimeMessages = subscribeToRuntimeMessages((message) => {
+      if (document.visibilityState === 'visible' && message.type === 'VOICE_COMMAND') {
+        const intent = parseRailwayCommand(message.transcript);
+        if (intent) voiceIntentRef.current(message.transcript, 'command');
+      }
+      if (document.visibilityState === 'visible' && message.type === 'DICTATION_TEXT' && message.isFinal) voiceIntentRef.current(message.text, 'dictation');
+    });
+    return () => { stopAssistantUpdates(); stopRuntimeMessages(); };
   }, []);
 
   useEffect(() => () => {
@@ -722,11 +816,10 @@ export function RailwayBookingDemo() {
       setFlowStep('DEPARTURE', false);
       const message = 'Blind Mode is on. Voice guidance is active. Tell me your departure station.';
       setVoiceMessage(message);
-      speechRef.current?.speak(message, settingsRef.current.speechRate, settingsRef.current.speechVolume);
-      speechRef.current?.start('command');
+      getVoiceAssistant().speak(message);
+      getVoiceAssistant().enable('command');
     } else {
-      speechRef.current?.stop();
-      setDictationMode(false);
+      getVoiceAssistant().disable();
       announce('Blind Mode is off. Visual controls are available again.', false);
     }
   }, [announce, setFlowStep, stopCamera]);
@@ -780,7 +873,8 @@ export function RailwayBookingDemo() {
         <section className="railway-feedback" aria-live="polite"><div><span className="railway-eyebrow">LIVE FEEDBACK</span><strong>{activationMessage}</strong></div><span>{lastTranscript ? `Last voice input: “${lastTranscript}”` : 'TouchView activation and voice status appear here.'}</span></section>
       </main>
       <aside className="railway-sidebar" aria-label="HandFree Railway controls"><section className="railway-sidebar-card railway-sidebar-card--state"><div className="railway-sidebar-heading"><div><span className="railway-eyebrow">HANDfree STATE</span><h2>Assistive controls</h2></div><span className={`railway-state-dot ${status.cameraState === 'active' ? 'is-good' : ''}`} /></div><p>Use one mode at a time while you learn the local flow. All data stays on this page.</p><div className="railway-state-grid"><span>Camera<strong>{status.cameraState === 'active' ? 'Active' : 'Off'}</strong></span><span>Target<strong>{targetLabel === 'No target under the pointer' ? 'None' : 'Locked'}</strong></span><span>Voice<strong>{voiceStatus === 'listening' ? 'Listening' : voiceStatus === 'unavailable' ? 'Unavailable' : 'Ready'}</strong></span><span>Stage<strong>{RAILWAY_FLOW.find((item) => item.step === step)?.label}</strong></span></div><button type="button" className="railway-text-button" onClick={() => setShowAdvancedStatus((current) => !current)}>{showAdvancedStatus ? 'Hide diagnostics' : 'Show diagnostics'}</button>{showAdvancedStatus && <dl className="railway-diagnostics"><div><dt>Engine</dt><dd>{status.engineState}</dd></div><div><dt>Pointer</dt><dd>{status.pointerSource}</dd></div><div><dt>Face</dt><dd>{status.faceDetected ? 'detected' : 'not detected'}</dd></div><div><dt>Hand</dt><dd>{status.handTracking}</dd></div><div><dt>Loops</dt><dd>{status.activeFaceLoops + status.activeHandLoops}</dd></div></dl>}</section>
-        <section className="railway-sidebar-card"><div className="railway-sidebar-heading"><div><span className="railway-eyebrow">VOICE + DICTATION</span><h2>Speak naturally</h2></div><Icon name="mic" /></div><p>Commands change booking state. Dictation writes into the field you select.</p><div className="railway-voice-actions"><button type="button" className="railway-button railway-button--primary" onClick={() => speechRef.current?.start('command')} disabled={voiceStatus === 'unavailable'}>{voiceStatus === 'listening' ? 'Listening…' : 'Start listening'}</button><button type="button" className="railway-button railway-button--quiet" onClick={() => { speechRef.current?.stop(); setDictationMode(false); setVoiceMessage('Voice input stopped.'); }}>Stop listening</button></div><div className="railway-voice-status" role="status"><strong>{modeText(dictationMode ? 'dictation' : 'command')} · {voiceStatus}</strong><span>{voiceMessage}</span></div><div className="railway-command-hint"><span>Try saying</span><strong>“Search trains”</strong><strong>“Read results”</strong><strong>“Confirm booking”</strong></div></section>
+        <VoiceAssistantControl settings={settings} onSettings={persistSettings} onCommand={(transcript) => voiceIntentRef.current(transcript, 'command')} onDictation={(text) => voiceIntentRef.current(text, 'dictation')} onConversation={handleGuidedConversation} onConversationStart={startGuidedConversation} title="Voice Assistant + dictation" />
+        <section className="railway-sidebar-card"><div className="railway-sidebar-heading"><div><span className="railway-eyebrow">VOICE GUIDE</span><h2>Speak naturally</h2></div><Icon name="mic" /></div><p>Use Start guided flow for a pre-made booking conversation. HandFree asks the next question, understands answers like “station is Pune Junction”, and keeps confirmation explicit.</p><div className="railway-voice-status" role="status"><strong>{modeText(voiceMode)} · {voiceStatus}</strong><span>{voiceMessage}</span></div><div className="railway-command-hint"><span>Try saying</span><strong>“station is Pune Junction”</strong><strong>“two passengers”</strong><strong>“confirm booking”</strong></div></section>
         <section className="railway-sidebar-card"><div className="railway-sidebar-heading"><div><span className="railway-eyebrow railway-eyebrow--purple">HANDFREE SENSE</span><h2>Read what is visible</h2></div><Icon name="target" /></div><p>Sense reads the actual visible form, results and confirmation instead of a hidden script.</p><div className="railway-sense-actions"><button type="button" onClick={() => readSense('page')}>Read page</button><button type="button" onClick={() => readSense('form')}>Read booking form</button><button type="button" onClick={() => readSense('results')}>Read trains</button><button type="button" onClick={() => readSense('fare')}>Read fare</button><button type="button" onClick={() => readSense('required')}>Read required fields</button><button type="button" onClick={() => readSense('confirmation')}>Read confirmation</button><button type="button" className="is-stop" onClick={() => { speechRef.current?.stopSpeaking(); setSenseStatus('ready'); setSenseOutput('Sense stopped reading.'); }}>Stop reading</button></div><div id="railway-sense-output" className="railway-sense-output" role="status"><span>{senseStatus === 'reading' ? 'Reading…' : 'Ready'}</span><p>{senseOutput}</p></div></section>
         <section className="railway-sidebar-card"><div className="railway-sidebar-heading"><div><span className="railway-eyebrow">FLOW</span><h2>Where you are</h2></div></div><ol className="railway-step-list">{RAILWAY_FLOW.map((item, index) => <li key={item.step} className={index === stepIndex(step) ? 'is-current' : index < stepIndex(step) ? 'is-done' : ''} aria-current={index === stepIndex(step) ? 'step' : undefined}><span>{String(index + 1).padStart(2, '0')}</span>{item.label}</li>)}</ol></section>
       </aside>

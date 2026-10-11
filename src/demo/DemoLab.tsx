@@ -12,7 +12,9 @@ import { SessionManager } from '../session/sessionManager';
 import { DwellController } from '../content/dwellController';
 import { findTargetAt } from '../content/targetDetector';
 import { mapCameraToViewport, readCalibrationGeometry, type CoordinatePoint } from '../tracking/coordinateMapping';
-import { SpeechController, type SpeechStatus } from '../voice/speechController';
+import { VoiceAssistantControl } from '../voice/VoiceAssistantControl';
+import { getVoiceAssistant } from '../voice/voiceAssistant';
+import { parseVoiceCommand, type VoiceIntent } from '../voice/commandParser';
 import { FistScrollController, type FistScrollEvent } from '../tracking/fistScroll';
 
 function targetName(target?: TargetInfo | null): string {
@@ -44,24 +46,6 @@ interface DemoConversationMessage {
   text: string;
   response: string;
   timestamp: number;
-}
-
-function hasSpeechRecognitionSupport(): boolean {
-  if (typeof window === 'undefined') return false;
-  const speechWindow = window as Window & { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown };
-  return Boolean(speechWindow.SpeechRecognition || speechWindow.webkitSpeechRecognition);
-}
-
-function normalizeVoicePhrase(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-}
-
-function isSendVoicePhrase(value: string): boolean {
-  return /^(?:send|send (?:the )?message|send above (?:the )?(?:message|msg)|submit (?:the )?(?:message|msg))$/.test(normalizeVoicePhrase(value));
-}
-
-function isClearVoicePhrase(value: string): boolean {
-  return /^(?:clear|clear (?:the )?(?:message|msg|field))$/.test(normalizeVoicePhrase(value));
 }
 
 function uniqueText(values: string[]): string[] {
@@ -139,14 +123,12 @@ export function DemoLab() {
   const [dwellProgress, setDwellProgress] = useState(0);
   const [handGesture, setHandGesture] = useState<HandGesture>('release');
   const [formResult, setFormResult] = useState('No action yet.');
-  const speechRecognitionSupported = hasSpeechRecognitionSupport();
   const [composerValue, setComposerValue] = useState('');
   const composerValueRef = useRef('');
+  const [compatListening, setCompatListening] = useState(false);
+  const [compatVoiceMessage, setCompatVoiceMessage] = useState('Voice input is ready.');
+  const compatMicModeRef = useRef(false);
   const [conversation, setConversation] = useState<DemoConversationMessage[]>([]);
-  const [voiceState, setVoiceState] = useState<SpeechStatus>(() => hasSpeechRecognitionSupport() ? 'idle' : 'unavailable');
-  const [voiceMessage, setVoiceMessage] = useState(() => hasSpeechRecognitionSupport()
-    ? 'Click the microphone to dictate a local message.'
-    : 'Voice recognition is unavailable in this browser. You can still type and send messages.');
   const [senseReport, setSenseReport] = useState<SenseReport | null>(null);
   const [senseResult, setSenseResult] = useState<SenseResult | null>(null);
   const [senseState, setSenseState] = useState<'idle' | 'reading' | 'ready'>('idle');
@@ -163,8 +145,6 @@ export function DemoLab() {
   const sensePageRef = useRef<HTMLElement>(null);
   const demoSurfaceRef = useRef<HTMLElement>(null);
   const senseUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
-  const speechRef = useRef<SpeechController | null>(null);
-  const voiceSessionRef = useRef(0);
   const conversationIdRef = useRef(0);
   const sharedModesRef = useRef<HandFreeSettings['enabledModes']>(settings.enabledModes);
   const trackerRef = useRef<SessionManager | null>(null);
@@ -513,7 +493,6 @@ export function DemoLab() {
     if (!message) {
       setFormResult('Write or dictate a message before sending.');
       setFeedback('Add a message before sending.');
-      setVoiceMessage('Write or dictate a message before sending.');
       return false;
     }
     const id = ++conversationIdRef.current;
@@ -526,97 +505,114 @@ export function DemoLab() {
     updateComposer('');
     setFormResult('Message sent.');
     setFeedback('Message sent. Demo response is local.');
-    setVoiceMessage('Message sent. You can edit and send another message.');
+    setFeedback('Message sent. You can edit and send another message.');
     return true;
   }
 
-  function stopVoiceInput(message = 'Voice input stopped.'): void {
-    voiceSessionRef.current += 1;
-    const controller = speechRef.current;
-    speechRef.current = null;
-    controller?.destroy();
-    setVoiceState('idle');
-    setVoiceMessage(message);
-    void sendMessage({ type: 'VOICE_STATUS', voice: 'idle', message });
-  }
-
-  function handleVoiceTranscript(transcript: string, isFinal: boolean): void {
-    if (!isFinal) return;
-    const phrase = normalizeVoicePhrase(transcript);
-    if (!phrase) {
-      stopVoiceInput('No words were captured. Try again when you are ready.');
-      return;
-    }
-    if (isSendVoicePhrase(phrase)) {
+  function handleCompatibilityDictation(text: string): void {
+    const normalized = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/^(?:send|send the message|send above (?:the )?(?:message|msg)|submit (?:the )?(?:message|msg))$/.test(normalized)) {
       const sent = submitDemoMessage();
-      stopVoiceInput(sent ? 'Message sent.' : 'Nothing was sent. Add a message first.');
-      return;
-    }
-    if (isClearVoicePhrase(phrase)) {
+      setCompatVoiceMessage(sent ? 'Message sent from voice input.' : 'Nothing was sent. Add a message first.');
+    } else if (/^(?:clear|clear the message|clear message)$/.test(normalized)) {
       updateComposer('');
       setFormResult('Message cleared.');
       setFeedback('Message cleared.');
-      stopVoiceInput('Message cleared.');
-      return;
+      setCompatVoiceMessage('Message cleared.');
+    } else {
+      updateComposer(text.trim());
+      setFormResult('Voice text ready to edit.');
+      setFeedback('Voice text captured. Edit it before sending.');
+      setCompatVoiceMessage('Voice text captured. Edit it before sending.');
     }
-    if (/^stop (?:listening|voice input)$/.test(phrase)) {
-      stopVoiceInput();
-      return;
-    }
-    updateComposer(transcript.trim());
-    setFormResult('Voice text ready to edit.');
-    setFeedback('Voice text captured. Edit it or say “send message”.');
-    stopVoiceInput('Voice text captured. Edit it before sending.');
+    compatMicModeRef.current = false;
+    setCompatListening(false);
+    getVoiceAssistant().setMode('command');
   }
 
-  function startVoiceInput(): void {
-    if (voiceState === 'listening' || speechRef.current?.status === 'listening') {
-      stopVoiceInput();
+  function toggleCompatibilityMicrophone(): void {
+    const assistant = getVoiceAssistant();
+    if (compatListening) {
+      compatMicModeRef.current = false;
+      setCompatListening(false);
+      setCompatVoiceMessage('Voice input stopped.');
+      assistant.disable('Voice input stopped.');
       return;
     }
-    if (!speechRecognitionSupported) {
-      setVoiceState('unavailable');
-      setVoiceMessage('Voice recognition is unavailable in this browser. You can still type and send messages.');
-      return;
-    }
+    compatMicModeRef.current = true;
+    setCompatListening(true);
+    setCompatVoiceMessage('Listening…');
+    if (assistant.state.enabled) assistant.setMode('dictation');
+    else assistant.enable('dictation');
+  }
 
-    voiceSessionRef.current += 1;
-    const session = voiceSessionRef.current;
-    speechRef.current?.destroy();
-    speechRef.current = null;
-    setVoiceState('processing');
-    setVoiceMessage('Requesting microphone access…');
-
-    const controller = new SpeechController({
-      onTranscript: (text, isFinal) => {
-        if (session !== voiceSessionRef.current) return;
-        handleVoiceTranscript(text, isFinal);
-      },
-      onStatus: (nextStatus, nextMessage) => {
-        if (session !== voiceSessionRef.current) return;
-        setVoiceState(nextStatus);
-        const fallback = nextStatus === 'listening'
-          ? 'Listening…'
-          : nextStatus === 'processing'
-            ? 'Processing voice input…'
-            : nextStatus === 'unavailable'
-              ? 'Voice recognition is unavailable in this browser.'
-              : nextStatus === 'error'
-                ? 'Voice recognition failed. Check microphone permission and retry.'
-                : 'Click the microphone to dictate a local message.';
-        setVoiceMessage(nextMessage || fallback);
-        const runtimeVoice = nextStatus === 'listening'
-          ? 'listening'
-          : nextStatus === 'error'
-            ? 'error'
-            : nextStatus === 'unavailable'
-              ? 'unavailable'
-              : 'idle';
-        void sendMessage({ type: 'VOICE_STATUS', voice: runtimeVoice, message: nextMessage || fallback });
+  function handleDemoVoiceCommand(transcript: string, intent: VoiceIntent): void {
+    switch (intent.type) {
+      case 'pause':
+        if (!settingsRef.current.paused) void togglePause();
+        return;
+      case 'resume':
+        if (settingsRef.current.paused) void togglePause();
+        return;
+      case 'cancel':
+        dwellRef.current?.cancel('Voice command cancelled');
+        void sendMessage({ type: 'CANCEL_DWELL' });
+        setFeedback('Action cancelled.');
+        return;
+      case 'reload':
+        window.location.reload();
+        return;
+      case 'history':
+        if (intent.direction === 'back') window.history.back(); else window.history.forward();
+        return;
+      case 'scroll':
+        if (intent.direction === 'top') demoSurfaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+        else if (intent.direction === 'bottom') demoSurfaceRef.current?.scrollTo({ top: demoSurfaceRef.current.scrollHeight, behavior: 'smooth' });
+        else demoSurfaceRef.current?.scrollBy({ top: intent.direction === 'up' || intent.direction === 'page-up' ? -window.innerHeight * .8 : window.innerHeight * .8, behavior: 'smooth' });
+        return;
+      case 'focus': {
+        const match = Array.from(document.querySelectorAll<HTMLElement>('input,textarea,select')).find((element) => `${element.getAttribute('aria-label') ?? ''} ${element.getAttribute('name') ?? ''} ${element.id} ${element.previousElementSibling?.textContent ?? ''}`.toLowerCase().includes(intent.query.toLowerCase()));
+        if (match) { match.focus(); setFeedback(`Focused ${intent.query}.`); } else setFeedback(`I could not find ${intent.query}.`);
+        return;
       }
-    });
-    speechRef.current = controller;
-    controller.start('command');
+      case 'click': {
+        const wanted = intent.query?.toLowerCase();
+        const match = Array.from(document.querySelectorAll<HTMLElement>('button,a[href]')).find((element) => !wanted || `${element.textContent ?? ''} ${element.getAttribute('aria-label') ?? ''}`.toLowerCase().includes(wanted));
+        if (match) { match.click(); setFeedback(`${match.textContent?.trim() || 'Control'} activated.`); } else setFeedback('I could not find that control.');
+        return;
+      }
+      case 'submit':
+        submitDemoMessage();
+        return;
+      case 'clear-field':
+        updateComposer('');
+        setFormResult('Message cleared.');
+        setFeedback('Message cleared.');
+        return;
+      case 'camera':
+        if (intent.action === 'start') { void startCamera(); return; }
+        if (intent.action === 'stop') { void stopCamera(); return; }
+        if (intent.action === 'pause' || intent.action === 'resume') { void togglePause(); return; }
+        if (intent.action === 'mirror-on' || intent.action === 'mirror-off') { void persist({ mirrorCamera: intent.action === 'mirror-on', touchViewMirrorCamera: intent.action === 'mirror-on' }); return; }
+        if (intent.action === 'fist-scroll-on' || intent.action === 'fist-scroll-off') { void persist({ fistScrollEnabled: intent.action === 'fist-scroll-on' }); return; }
+        return;
+      case 'read-screen': runSense('read-page'); return;
+      case 'read-headings': runSense('read-headings'); return;
+      case 'read-links': runSense('find-links'); return;
+      case 'read-dates': runSense('find-deadlines'); return;
+      case 'stop-reading': stopSenseReading(); return;
+      case 'touchview':
+        if (intent.action === 'pause') { void persist({ touchViewPaused: true, paused: true }); return; }
+        if (intent.action === 'resume') { void persist({ touchViewPaused: false, paused: false }); return; }
+        if (intent.action === 'reset-calibration') { void persist({ calibration: null, touchViewCalibration: null }); return; }
+        if (intent.action === 'set-dwell') { void persist({ dwellDuration: Math.round((intent.value ?? 1) * 1000) }); return; }
+        return;
+      case 'read-query':
+        runSense(intent.query.includes('deadline') || intent.query.includes('date') ? 'find-deadlines' : intent.query.includes('head') ? 'read-headings' : 'read-page');
+        return;
+      default:
+        void sendMessage({ type: 'VOICE_COMMAND', transcript });
+    }
   }
 
   useEffect(() => {
@@ -719,6 +715,15 @@ export function DemoLab() {
       tracker.updateSettings(effective);
     });
     const unsubscribeRuntime = subscribeToRuntimeMessages((message) => {
+      if (document.visibilityState === 'visible' && message.type === 'VOICE_COMMAND') {
+        const intent = parseVoiceCommand(message.transcript);
+        if (intent) handleDemoVoiceCommand(message.transcript, intent);
+      }
+      if (document.visibilityState === 'visible' && message.type === 'DICTATION_TEXT' && message.isFinal) {
+        updateComposer(message.text);
+        setFormResult('Voice text ready to edit.');
+        setFeedback('Voice text captured. Edit it before sending.');
+      }
       if (message.type === 'POINTER_UPDATE') {
         pointerTargetRef.current = clampPoint(message.position);
         lastTrackingAtRef.current = performance.now();
@@ -744,9 +749,6 @@ export function DemoLab() {
       tracker.clearConsumers();
       ownershipRef.current.release();
       dwell.destroy();
-      voiceSessionRef.current += 1;
-      speechRef.current?.destroy();
-      speechRef.current = null;
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       senseUtteranceRef.current = null;
       unsubscribeSettings();
@@ -890,11 +892,14 @@ export function DemoLab() {
           <form id="demo-form" onSubmit={handleSubmit}>
             <div className="demo-composer" aria-label="Demo message composer">
               <label className="demo-field demo-message-field" htmlFor="demo-note"><span>Message</span><textarea id="demo-note" name="message" rows={4} placeholder="Write a short message" value={composerValue} onChange={(event) => updateComposer(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submitDemoMessage(); } }} /></label>
-              <button id="demo-microphone" className={`demo-mic-button${voiceState === 'listening' ? ' demo-mic-button--listening' : ''}${voiceState === 'error' || voiceState === 'unavailable' ? ' demo-mic-button--error' : ''}`} type="button" aria-label={voiceState === 'listening' ? 'Stop listening' : 'Use voice input'} title={voiceState === 'listening' ? 'Stop listening' : 'Use voice input'} aria-pressed={voiceState === 'listening'} aria-describedby="demo-voice-status" disabled={!speechRecognitionSupported} onClick={startVoiceInput}><Icon name="mic" /><span>{voiceState === 'listening' ? 'Stop listening' : 'Voice input'}</span></button>
               <button id="demo-submit" type="submit" className="demo-page-button demo-page-button--primary">Send</button>
             </div>
-            <p id="demo-voice-status" className={`demo-voice-status${voiceState === 'listening' ? ' demo-voice-status--listening' : ''}${voiceState === 'error' || voiceState === 'unavailable' ? ' demo-voice-status--error' : ''}`} role={voiceState === 'error' || voiceState === 'unavailable' ? 'alert' : 'status'} aria-live="polite"><Icon name={voiceState === 'error' || voiceState === 'unavailable' ? 'warning' : voiceState === 'listening' ? 'mic' : 'info'} />{voiceMessage}</p>
           </form>
+          <div className="demo-voice-compatibility" aria-label="Demo voice input">
+            <button id="demo-microphone" type="button" className={`demo-mic-button${compatListening ? ' demo-mic-button--listening' : ''}`} aria-pressed={compatListening} aria-label={compatListening ? 'Stop voice input' : 'Start voice input'} onClick={toggleCompatibilityMicrophone}><Icon name="mic" /><span>{compatListening ? 'Stop listening' : 'Voice input'}</span></button>
+            <p id="demo-voice-status" className={`demo-voice-status${compatListening ? ' demo-voice-status--listening' : ''}`} role="status" aria-live="polite"><Icon name="info" />{compatVoiceMessage}</p>
+          </div>
+          <VoiceAssistantControl compact settings={settings} onSettings={persist} onCommand={handleDemoVoiceCommand} onDictation={(text) => { if (compatMicModeRef.current) { handleCompatibilityDictation(text); return; } updateComposer(text); setFormResult('Voice text ready to edit.'); setFeedback('Voice text captured. Edit it before sending.'); }} title="Voice Assistant + dictation" />
           <div id="demo-result" className="demo-result" role="status" aria-live="polite"><span>Result</span><strong>{formResult}</strong></div>
         </article>
       </div>

@@ -185,7 +185,7 @@ try {
   await blocked.evaluate(() => chrome.runtime.sendMessage({ type: 'SCROLL_START', position: { x: .5, y: .5, confidence: .9, source: 'hand-tracking' } }));
   await blocked.waitForTimeout(30);
   await blocked.evaluate(() => chrome.runtime.sendMessage({ type: 'SCROLL_UPDATE', position: { x: .5, y: .5, confidence: .9, source: 'hand-tracking' }, deltaY: 180, direction: 'down', velocity: 180 }));
-  await blocked.waitForTimeout(120);
+  await blocked.waitForFunction((before) => document.querySelector('.demo-page-surface')?.scrollTop > before, demoScrollBefore);
   check('Demo Lab scroll section moves through the internal route', await demoSurface.evaluate((element, before) => element.scrollTop > before, demoScrollBefore));
   await blocked.evaluate(() => chrome.runtime.sendMessage({ type: 'SCROLL_STOP', reason: 'released' }));
   await blocked.waitForTimeout(30);

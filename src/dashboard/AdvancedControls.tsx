@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Icon } from '../shared/icons';
 import { sendMessage, subscribeToRuntimeMessages } from '../shared/runtime';
 import type { AnalyticsSummary, ControlMode, HandFreeSettings, RuntimeStatus } from '../shared/types';
-import { SpeechController, type SpeechStatus } from '../voice/speechController';
+import { getVoiceAssistant } from '../voice/voiceAssistant';
+import { VoiceAssistantControl } from '../voice/VoiceAssistantControl';
 import { recordAnalytics } from '../analytics/analytics';
 import { formatConfidence } from '../shared/sessionState';
 
@@ -16,19 +17,18 @@ export function SenseControls({ settings, onSettings }: { settings: HandFreeSett
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const responseVersion = useRef(0);
-  const speaker = useRef<SpeechController | null>(null);
+  const speaker = useRef(getVoiceAssistant());
   const preferences = useRef(settings);
   preferences.current = settings;
   const enabled = settings.enabledModes.includes('sense');
   useEffect(() => {
-    speaker.current = new SpeechController({ onTranscript: () => undefined, onStatus: () => undefined });
     const unsubscribe = subscribeToRuntimeMessages(incoming => {
       if (incoming.type !== 'SENSE_RESPONSE') return;
       responseVersion.current += 1;
       setMessage(incoming.message);
-      if (preferences.current.enabledModes.includes('sense')) speaker.current?.speak(incoming.message, preferences.current.speechRate, preferences.current.speechVolume);
+      if (preferences.current.enabledModes.includes('sense')) speaker.current.speak(incoming.message);
     });
-    return () => { unsubscribe(); speaker.current?.destroy(); };
+    return () => { unsubscribe(); speaker.current.stopSpeaking(); };
   }, []);
   function toggle(value: boolean) {
     onSettings({ enabledModes: value ? Array.from(new Set([...settings.enabledModes, 'sense' as const])) : settings.enabledModes.filter(mode => mode !== 'sense') });
@@ -42,7 +42,7 @@ export function SenseControls({ settings, onSettings }: { settings: HandFreeSett
     try {
       const response = await sendMessage({ type: 'SENSE_QUERY', query });
       if (responseVersion.current !== version) return;
-      if (response?.type === 'SENSE_RESPONSE') { setMessage(response.message); speaker.current?.speak(response.message, preferences.current.speechRate, preferences.current.speechVolume); }
+      if (response?.type === 'SENSE_RESPONSE') { setMessage(response.message); speaker.current.speak(response.message); }
       else if (response?.type === 'PAGE_UNSUPPORTED' || response?.type === 'TOUCHVIEW_ERROR') setMessage(response.reason);
       else if (!response) setMessage('HandFree Sense could not connect to the active page. Open a supported webpage and retry.');
       else setMessage('HandFree Sense returned no readable page content.');
@@ -64,8 +64,6 @@ export function AdvancedControls({ settings, status, onSettings, onStatus }: { s
   preferences.current = settings;
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
   const [message, setMessage] = useState('');
-  const speechRef = useRef<SpeechController | null>(null);
-  const feedbackRef = useRef<SpeechController | null>(null);
   const [testingMicrophone, setTestingMicrophone] = useState(false);
   const [microphoneLevel, setMicrophoneLevel] = useState(0);
   const [analyticsBusy, setAnalyticsBusy] = useState(false);
@@ -107,8 +105,6 @@ export function AdvancedControls({ settings, status, onSettings, onStatus }: { s
   }, []);
   async function testMicrophone() {
     if (microphoneBusy.current) return;
-    speechRef.current?.destroy();
-    speechRef.current = null;
     statusCallback.current({ voice: 'idle' });
     void sendMessage({ type: 'VOICE_STATUS', voice: 'idle' });
     const generation = ++microphoneGeneration.current;
@@ -169,23 +165,7 @@ export function AdvancedControls({ settings, status, onSettings, onStatus }: { s
   }
   useEffect(() => {
     void refreshAnalytics();
-    feedbackRef.current = new SpeechController({ onTranscript: () => undefined, onStatus: () => undefined });
-    const stopMessages = subscribeToRuntimeMessages((incoming) => {
-      if (incoming.type === 'VOICE_COMMAND_RESULT') {
-        setMessage(incoming.message);
-        if (incoming.speak) feedbackRef.current?.speak(incoming.message, preferences.current.speechRate, preferences.current.speechVolume);
-        else if (incoming.message === 'Reading stopped.') feedbackRef.current?.stopSpeaking();
-      }
-    });
-    const closeSpeech = () => {
-      if (!speechRef.current) return;
-      speechRef.current.destroy();
-      speechRef.current = null;
-      publishMicrophone('stopped');
-      void sendMessage({ type: 'VOICE_STATUS', voice: 'idle' });
-    };
-    window.addEventListener('pagehide', closeSpeech);
-    return () => { stopMessages(); window.removeEventListener('pagehide', closeSpeech); closeSpeech(); feedbackRef.current?.destroy(); };
+    return () => undefined;
   }, []);
 
   function updateModes(mode: ControlMode, enabled: boolean) {
@@ -194,33 +174,10 @@ export function AdvancedControls({ settings, status, onSettings, onStatus }: { s
     void recordAnalytics({ type: enabled ? 'mode-enabled' : 'mode-disabled', timestamp: Date.now(), mode });
   }
 
-  function startSpeech(mode: 'command' | 'dictation') {
-    if (microphoneBusy.current) stopMicrophoneTest();
-    speechRef.current?.destroy();
-    const controller = new SpeechController({
-      onTranscript: (transcript, isFinal, recognitionMode) => {
-        if (recognitionMode === 'command' && isFinal) { void sendMessage({ type: 'VOICE_COMMAND', transcript }); void recordAnalytics({ type: 'voice-command-received', timestamp: Date.now(), mode: 'voice', metadata: { length: transcript.length } }); }
-        if (recognitionMode === 'dictation' && isFinal) { void sendMessage({ type: 'DICTATION_TEXT', text: transcript, isFinal }); }
-      },
-      onStatus: (nextStatus: SpeechStatus, nextMessage) => {
-        const voice = nextStatus === 'listening' ? 'listening' : nextStatus === 'error' ? 'error' : nextStatus === 'unavailable' ? 'unavailable' : 'idle';
-        if (mounted.current) statusCallback.current({ voice, voiceMessage: nextMessage });
-        publishMicrophone(nextStatus === 'listening' ? 'active' : nextStatus === 'unavailable' ? 'unavailable' : nextStatus === 'error' && /not.allowed|service.not.allowed/i.test(nextMessage ?? '') ? 'denied' : 'stopped');
-        if (mounted.current) setMessage(nextMessage || (nextStatus === 'listening' ? `${mode === 'command' ? 'Voice command' : 'Dictation'} is listening.` : ''));
-        void sendMessage({ type: 'VOICE_STATUS', voice, message: nextMessage });
-      }
-    });
-    speechRef.current = controller;
-    onStatus({ microphone: 'prompt', voice: 'processing' });
-    publishMicrophone('prompt');
-    controller.start(mode);
-  }
-
-  function stopSpeech() { speechRef.current?.stop(); publishMicrophone('stopped'); onStatus({ voice: 'idle' }); void sendMessage({ type: 'VOICE_STATUS', voice: 'idle' }); setMessage('Voice input stopped.'); }
-
   return <>
     <section className="card"><div className="section-heading"><span className="eyebrow">Control modes</span><h2>Choose how HandFree listens</h2><p>Head and hand modes can be changed while the camera is running; HandFree reloads only the affected tracking models.</p></div>{(['hand', 'voice', 'dictation'] as ControlMode[]).map((mode) => <div className="control-row" key={mode}><div className="control-copy"><strong>{modeLabels[mode]}</strong><span>{mode === 'hand' ? 'Index-finger pointer, pinch click, and open-palm pause.' : mode === 'voice' ? 'Deterministic navigation and interaction commands.' : mode === 'dictation' ? 'Insert speech into the focused field without logging text.' : mode === 'sense' ? 'Extract page structure and read real page content aloud.' : 'Relative head movement with calibrated dwell selection.'}</span></div><Toggle checked={mode === 'head' ? settings.headControlEnabled && settings.enabledModes.includes(mode) : settings.enabledModes.includes(mode)} label={`Enable ${modeLabels[mode]}`} onChange={(value) => updateModes(mode, value)} /></div>)}</section>
-    <section className="card"><div className="section-heading"><span className="eyebrow">Experimental · voice and dictation</span><h2>Test microphone and speech input</h2><p>Voice and dictation have not been manually tested. A microphone level test checks audio input only; use the speech controls to test recognition separately. Speech recognition stays browser-based. Commands are parsed deterministically, and dictated text is sent only to the focused local webpage field.</p></div><div className="metric-grid"><div className="metric"><span>Microphone</span><strong>{status.microphone}</strong></div><div className="metric"><span>Recognition</span><strong>{status.voice}</strong></div></div><div className="button-row" style={{ marginTop: 16 }}><button className="button" disabled={testingMicrophone || status.voice === 'listening'} onClick={() => void testMicrophone()}>Test microphone · 5 seconds</button><button className="button" disabled={!testingMicrophone} onClick={stopMicrophoneTest}>Stop microphone test</button><button className="button button--primary" onClick={() => startSpeech('command')} disabled={testingMicrophone || status.voice === 'listening'}><Icon name="play" />Start voice commands</button><button className="button" onClick={() => startSpeech('dictation')} disabled={testingMicrophone || status.voice === 'listening'}>Start dictation</button><button className="button button--danger" onClick={stopSpeech} disabled={status.voice !== 'listening'}>Stop listening</button></div>{testingMicrophone && <div className="slider-label"><span>Measured input</span><meter min="0" max="100" value={microphoneLevel} aria-label="Measured microphone input level" /><output>{microphoneLevel.toFixed(1)}% RMS</output></div>}{message && <p className="notice" role="status" style={{ marginTop: 14 }}><Icon name="info" /><span>{message}</span></p>}</section>
+    <VoiceAssistantControl settings={settings} onSettings={onSettings} onCommand={(transcript) => { void sendMessage({ type: 'VOICE_COMMAND', transcript }); void recordAnalytics({ type: 'voice-command-received', timestamp: Date.now(), mode: 'voice', metadata: { length: transcript.length } }); }} onDictation={(text) => { void sendMessage({ type: 'DICTATION_TEXT', text, isFinal: true }); }} />
+    <section className="card"><div className="section-heading"><span className="eyebrow">Microphone diagnostics</span><h2>Test the input device</h2><p>This short level test uses a temporary microphone track, measures input locally, then releases it. It does not record or store audio.</p></div><div className="metric-grid"><div className="metric"><span>Microphone</span><strong>{status.microphone}</strong></div><div className="metric"><span>Recognition</span><strong>{status.voice}</strong></div></div><div className="button-row" style={{ marginTop: 16 }}><button className="button" disabled={testingMicrophone || status.voice === 'listening'} onClick={() => void testMicrophone()}>Test microphone · 5 seconds</button><button className="button" disabled={!testingMicrophone} onClick={stopMicrophoneTest}>Stop microphone test</button></div>{testingMicrophone && <div className="slider-label"><span>Measured input</span><meter min="0" max="100" value={microphoneLevel} aria-label="Measured microphone input level" /><output>{microphoneLevel.toFixed(1)}% RMS</output></div>}{message && <p className="notice" role="status" style={{ marginTop: 14 }}><Icon name="info" /><span>{message}</span></p>}</section>
     <Diagnostics status={status} calibrated={Boolean(settings.calibration)} /><section className="card"><div className="section-heading"><span className="eyebrow">Local analytics</span><h2>Recent session signals</h2><p>Only event metadata is stored locally. Camera frames, microphone recordings, sensitive dictated text, and full browsing history are not stored.</p></div><div className="metric-grid"><div className="metric"><span>Completed tasks</span><strong>{summary?.completedTasks ?? '—'}</strong></div><div className="metric"><span>Cancelled activations</span><strong>{summary?.touchViewCancelledActivations ?? '—'}</strong></div><div className="metric"><span>Events</span><strong>{summary?.totalEvents ?? '—'}</strong></div><div className="metric"><span>Completed dwells</span><strong>{summary?.completedDwells ?? '—'}</strong></div><div className="metric"><span>Voice commands</span><strong>{summary?.voiceCommands ?? '—'}</strong></div><div className="metric"><span>Tracking interruptions</span><strong>{summary?.trackingInterruptions ?? '—'}</strong></div><div className="metric"><span>TouchView sessions</span><strong>{summary?.touchViewUsage ?? '—'}</strong></div><div className="metric"><span>TouchView activations</span><strong>{summary?.touchViewSuccessfulActivations ?? '—'}</strong></div><div className="metric"><span>Calibration success</span><strong>{summary ? `${Math.round(summary.touchViewCalibrationSuccessRate * 100)}%` : '—'}</strong></div><div className="metric"><span>TouchView avg. hold</span><strong>{summary ? `${Math.round(summary.touchViewAverageActivationTime)} ms` : '—'}</strong></div></div><h3>Recent events</h3>{summary && summary.recent.length > 0 ? <ol className="analytics-recent">{summary.recent.slice(0, 8).map((event, index) => <li key={`${event.id ?? event.timestamp}-${index}`}><time dateTime={new Date(event.timestamp).toISOString()}>{new Date(event.timestamp).toLocaleTimeString()}</time> · {event.type.replaceAll('-', ' ').replaceAll('_', ' ')}{event.mode ? ` · ${event.mode}` : ''}{event.outcome ? ` · ${event.outcome}` : ''}</li>)}</ol> : <p className="privacy-copy">{summary ? 'No recent events.' : 'Session summary unavailable.'}</p>}<div className="button-row" style={{ marginTop: 16 }}><button className="button" disabled={analyticsBusy} onClick={() => void refreshAnalytics()}>Refresh summary</button><button className="button button--danger" disabled={analyticsBusy} onClick={() => void resetAnalytics()}>{analyticsBusy ? 'Resetting…' : 'Reset local session'}</button></div>{analyticsMessage && <p className="notice" role="status">{analyticsMessage}</p>}</section>
   </>;
 }
