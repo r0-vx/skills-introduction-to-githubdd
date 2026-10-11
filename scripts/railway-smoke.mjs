@@ -55,8 +55,13 @@ try {
     };
     Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
       cancel() {},
-      speak(utterance) { utterance.onstart?.(); setTimeout(() => utterance.onend?.(), 20); }
+      speak(utterance) {
+        window.__handfreeSpoken.push(utterance.text);
+        utterance.onstart?.();
+        setTimeout(() => utterance.onend?.(), 20);
+      }
     } });
+    window.__handfreeSpoken = [];
   });
   await page.goto(`chrome-extension://${extensionId}/railway.html`);
   await page.getByRole('heading', { name: 'Book a journey at your own pace.' }).waitFor();
@@ -72,12 +77,26 @@ try {
   await page.locator('#railway-search').click();
   await page.getByRole('heading', { name: 'Available demo trains' }).waitFor();
   check('search transitions to local train results', await page.locator('.railway-train-card').count() === 3);
-  await page.getByRole('button', { name: 'Choose train' }).first().click();
+  const resultsNarration = await page.evaluate(() => window.__handfreeSpoken.at(-1) || '');
+  check('train results narrate numbered options and confirmation instructions', /Option 1:/.test(resultsNarration) && /Option 2:/.test(resultsNarration) && /Option 3:/.test(resultsNarration) && /choose option 1/.test(resultsNarration) && /confirm option/.test(resultsNarration));
+  await page.getByRole('button', { name: 'Start guided flow' }).click();
+  await page.waitForTimeout(80);
+  await page.evaluate(() => window.__handfreeEmitSpeech('choose option 2'));
+  await page.waitForTimeout(100);
+  const selectionPrompt = await page.evaluate(() => window.__handfreeSpoken.at(-1) || '');
+  check('voice option selection repeats the chosen train and asks for confirmation', /Option 2: Blue Line Intercity/.test(selectionPrompt) && /confirm option 2/.test(selectionPrompt) && await page.locator('.railway-hero-status small').innerText().then((text) => text.includes('Option 2 selected')));
+  await page.evaluate(() => window.__handfreeEmitSpeech('confirm option 2'));
+  await page.waitForTimeout(120);
+  const confirmationPrompt = await page.evaluate(() => window.__handfreeSpoken.at(-1) || '');
+  check('voice option confirmation opens passenger details', await page.getByRole('heading', { name: 'Passenger details' }).count() === 1 && /Option 2 confirmed/.test(confirmationPrompt) && await page.locator('.railway-hero-status small').innerText().then((text) => text.includes('Option 2 confirmed')));
+  await page.getByRole('button', { name: 'Stop guided flow' }).click();
   await page.locator('#railway-name').fill('Asha Rao');
   await page.locator('#railway-contact').fill('9876543210');
   await page.locator('#railway-details').fill('Window seat requested for this local demonstration.');
   await page.locator('#railway-review').click();
   check('passenger details validate and reach review', await page.getByRole('heading', { name: 'Review before approval' }).count() === 1 && await page.getByText('Asha Rao').count() >= 1);
+  const reviewNarration = await page.evaluate(() => window.__handfreeSpoken.at(-1) || '');
+  check('review narrates the complete ticket and asks for final confirmation', /Mumbai Central.*Delhi Junction/.test(reviewNarration) && /Asha Rao/.test(reviewNarration) && /Window seat requested/.test(reviewNarration) && /confirm booking/.test(reviewNarration));
   await page.locator('#railway-review-approve').click();
   check('review requires an explicit approval step', await page.getByRole('heading', { name: 'Confirm the simulated booking?' }).count() === 1);
   await page.locator('#railway-confirm').click();

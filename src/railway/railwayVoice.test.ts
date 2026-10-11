@@ -9,6 +9,8 @@ describe('railway voice commands', () => {
     expect(parseRailwayCommand('two passengers')).toEqual({ type: 'set-passengers', value: 2 });
     expect(parseRailwayCommand('sleeper')).toEqual({ type: 'set-class', value: 'sleeper' });
     expect(parseRailwayCommand('confirm booking')).toEqual({ type: 'confirm' });
+    expect(parseRailwayCommand('confirm option 2')).toEqual({ type: 'confirm-option', value: 2 });
+    expect(parseRailwayCommand('approve option three')).toEqual({ type: 'confirm-option', value: 3 });
   });
 
   it('parses results, reading and recovery commands', () => {

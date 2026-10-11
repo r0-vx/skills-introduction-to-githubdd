@@ -66,13 +66,25 @@ function promptForStep(step: RailwayStep, form: RailwayForm): string {
     case 'PASSENGERS': return `How many passengers? The current count is ${form.passengers}.`;
     case 'CLASS': return `Which class would you like? Choose general, sleeper, AC chair, or first AC.`;
     case 'SEARCHING': return 'Searching the local demo timetable.';
-    case 'RESULTS': return 'Trains are ready. Say choose first, choose cheapest, choose fastest, or choose option followed by a number.';
+    case 'RESULTS': return 'The train options are ready. I will read each option. Say choose option 1, option 2, or option 3, then confirm the option you want.';
     case 'TRAIN_SELECTION': return 'Choose a train to continue to passenger details.';
     case 'PASSENGER_DETAILS': return 'Enter the passenger name and contact details, then say next or review booking.';
-    case 'REVIEW': return 'Review the visible booking summary. Say confirm review to continue to the approval step.';
-    case 'APPROVAL': return 'This is a simulated local booking. Say confirm booking only if the details are correct.';
+    case 'REVIEW': return 'I will read the complete ticket review now. Say confirm booking when every detail is correct, or say go back to edit.';
+    case 'APPROVAL': return 'Final approval. Say confirm booking to create the fictional local reference, or say go back to edit.';
     case 'CONFIRMED': return 'The simulated booking is confirmed. Say start over to create another demo booking.';
   }
+}
+
+function trainOptionNarration(train: RailwayTrain, form: RailwayForm, option: number): string {
+  const seats = train.availability[form.className];
+  const availability = seats > 0 ? `${seats} seats available` : 'waitlist only';
+  return `Option ${option}: ${train.name}, train ${train.number}, departs at ${train.departure}, arrives at ${train.arrival}, duration ${train.duration}, ${classLabel(form.className)} fare rupees ${fareFor(train, form.className, form.passengers).toLocaleString()} for ${form.passengers} passenger${form.passengers === 1 ? '' : 's'}, ${availability}.`;
+}
+
+function trainResultsNarration(trains: RailwayTrain[], form: RailwayForm): string {
+  const options = trains.map((train, index) => trainOptionNarration(train, form, index + 1)).join(' ');
+  const optionNames = trains.map((_, index) => `option ${index + 1}`).join(', ');
+  return `I found ${trains.length} demo train options from ${form.from} to ${form.to} for ${formatRailwayDate(form.date)}. ${options} Say choose ${optionNames}. After you choose, I will repeat your selection and ask you to say confirm option followed by its number.`;
 }
 
 function modeText(mode: RecognitionMode): string {
@@ -127,6 +139,7 @@ export function RailwayBookingDemo() {
   const [selectedTrainId, setSelectedTrainId] = useState<string | null>(null);
   const selectedTrainRef = useRef(selectedTrainId);
   selectedTrainRef.current = selectedTrainId;
+  const pendingTrainSelectionRef = useRef<{ id: string; option: number } | null>(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [notice, setNotice] = useState('This is a local simulation. No real ticket, payment or railway provider is contacted.');
   const [bookingReference, setBookingReference] = useState('');
@@ -202,6 +215,41 @@ export function RailwayBookingDemo() {
     const prompt = promptForStep(next, formRef.current);
     announce(prompt, speak);
   }, [announce]);
+
+  const narrateTicketReview = useCallback(() => {
+    const current = formRef.current;
+    const selected = resultsRef.current.find((train) => train.id === selectedTrainRef.current) ?? findRailwayTrain(selectedTrainRef.current);
+    const journey = current.journey === 'return'
+      ? `a return journey with a return date of ${formatRailwayDate(current.returnDate)}`
+      : 'a one-way journey';
+    const train = selected
+      ? `${selected.name}, train ${selected.number}, departing at ${selected.departure}, arriving at ${selected.arrival}, with a journey time of ${selected.duration}`
+      : 'no train selected';
+    const fare = selected
+      ? `The total fare is rupees ${fareFor(selected, current.className, current.passengers).toLocaleString()}.`
+      : 'The total fare is not available until a train is selected.';
+    const note = current.passengerDetails.trim()
+      ? `Accessibility or seating note: ${current.passengerDetails.trim()}.`
+      : 'No accessibility or seating note was provided.';
+    const narration = [
+      'Complete ticket review.',
+      `Route: ${current.from} to ${current.to}.`,
+      `Travel date: ${formatRailwayDate(current.date)}.`,
+      `Journey: ${journey}.`,
+      `Train: ${train}.`,
+      `Passengers: ${current.passengers}.`,
+      `Class: ${classLabel(current.className)}.`,
+      `Passenger name: ${current.passengerName.trim()}.`,
+      `Contact number: ${current.contact.trim()}.`,
+      note,
+      fare,
+      'This is a local simulation only. No real ticket will be booked and no payment will be taken.',
+      'When you are ready, say confirm booking to continue to final confirmation, or say go back to edit.'
+    ].join(' ');
+    setVoiceMessage(narration);
+    setNotice('Ticket review read aloud. Say “confirm booking” when every detail is correct.');
+    speechRef.current?.speak(narration, settingsRef.current.speechRate, settingsRef.current.speechVolume);
+  }, []);
 
   const updatePointer = useCallback((position: PointerPosition | HandPointerPosition, gesture: HandGesture = 'release') => {
     if ((!touchViewRef.current && !headRef.current && !handRef.current) || blindRef.current || pausedRef.current) return;
@@ -507,6 +555,7 @@ export function RailwayBookingDemo() {
     setErrorMessage('');
     setSelectedTrainId(null);
     selectedTrainRef.current = null;
+    pendingTrainSelectionRef.current = null;
     setStep('SEARCHING');
     stepRef.current = 'SEARCHING';
     setNotice(`Searching local demo trains from ${current.from} to ${current.to}…`);
@@ -517,20 +566,65 @@ export function RailwayBookingDemo() {
       setResults(found);
       stepRef.current = 'RESULTS';
       setStep('RESULTS');
-      const message = `${found.length} demo trains found. Choose a train to continue.`;
-      setNotice(message);
-      setVoiceMessage(message);
-      speechRef.current?.speak(message, settingsRef.current.speechRate, settingsRef.current.speechVolume);
+      const narration = trainResultsNarration(found, current);
+      setNotice(`${found.length} train options are ready. Say choose option 1, 2, or 3.`);
+      setVoiceMessage(narration);
+      speechRef.current?.speak(narration, settingsRef.current.speechRate, settingsRef.current.speechVolume);
       void recordAnalytics({ type: 'task-started', timestamp: Date.now(), mode: 'voice', outcome: 'success', metadata: { resultCount: found.length } });
     }, 420);
   }, []);
 
   const chooseTrain = useCallback((train: RailwayTrain) => {
+    pendingTrainSelectionRef.current = null;
     setSelectedTrainId(train.id);
     selectedTrainRef.current = train.id;
+    guidedFieldRef.current = 'passengerName';
     setFlowStep('PASSENGER_DETAILS', blindRef.current);
     setNotice(`${train.name} selected. Complete the passenger details.`);
   }, [setFlowStep]);
+
+  const requestTrainSelection = useCallback((index: number) => {
+    const list = resultsRef.current;
+    if (!list.length) {
+      announce('There are no train options yet. Say search trains first.', true);
+      return;
+    }
+    const safeIndex = Math.max(0, Math.min(list.length - 1, index));
+    const train = list[safeIndex];
+    const option = safeIndex + 1;
+    setSelectedTrainId(train.id);
+    selectedTrainRef.current = train.id;
+    pendingTrainSelectionRef.current = { id: train.id, option };
+    const message = `${trainOptionNarration(train, formRef.current, option)} You selected option ${option}. Say confirm option ${option} to continue, or choose another option.`;
+    setNotice(`Option ${option} selected. Say confirm option ${option} to continue.`);
+    setVoiceMessage(message);
+    speechRef.current?.speak(message, settingsRef.current.speechRate, settingsRef.current.speechVolume);
+  }, [announce]);
+
+  const confirmTrainOption = useCallback((option: number) => {
+    if (stepRef.current !== 'RESULTS' && stepRef.current !== 'TRAIN_SELECTION') {
+      announce('Train options are not active right now. Search for trains first.', true);
+      return;
+    }
+    const pending = pendingTrainSelectionRef.current;
+    if (!pending) {
+      announce('Choose option 1, option 2, or option 3 first. I will then ask you to confirm it.', true);
+      return;
+    }
+    if (pending.option !== option) {
+      announce(`Option ${pending.option} is selected. Say confirm option ${pending.option}, or choose another option.`, true);
+      return;
+    }
+    const train = resultsRef.current.find((candidate) => candidate.id === pending.id);
+    if (!train) {
+      pendingTrainSelectionRef.current = null;
+      announce('That train option is no longer available. Please search again.', true);
+      return;
+    }
+    pendingTrainSelectionRef.current = null;
+    chooseTrain(train);
+    announce(`Option ${option} confirmed. ${train.name} selected. Enter the passenger name and contact details, then say review booking.`, true);
+  }, [announce, chooseTrain]);
 
   const submitPassenger = useCallback((event?: FormEvent) => {
     event?.preventDefault();
@@ -544,8 +638,9 @@ export function RailwayBookingDemo() {
       return;
     }
     setErrorMessage('');
-    setFlowStep('REVIEW', blindRef.current);
-  }, [setFlowStep]);
+    setFlowStep('REVIEW', false);
+    narrateTicketReview();
+  }, [narrateTicketReview, setFlowStep]);
 
   const goBack = useCallback(() => {
     const current = stepRef.current;
@@ -598,6 +693,7 @@ export function RailwayBookingDemo() {
     resultsRef.current = [];
     setSelectedTrainId(null);
     selectedTrainRef.current = null;
+    pendingTrainSelectionRef.current = null;
     setBookingReference('');
     setErrorMessage('');
     setFlowStep('WELCOME', blindRef.current);
@@ -609,11 +705,8 @@ export function RailwayBookingDemo() {
     if (!list.length) return;
     const currentIndex = Math.max(0, list.findIndex((item) => item.id === selectedTrainRef.current));
     const nextIndex = (currentIndex + direction + list.length) % list.length;
-    const next = list[nextIndex];
-    setSelectedTrainId(next.id);
-    selectedTrainRef.current = next.id;
-    setNotice(`${next.name} highlighted. Say choose option ${nextIndex + 1} to select it.`);
-  }, []);
+    requestTrainSelection(nextIndex);
+  }, [requestTrainSelection]);
 
   const readSense = useCallback((kind: SenseRead) => {
     const root = contentRef.current;
@@ -748,9 +841,10 @@ export function RailwayBookingDemo() {
         if (!list.length) { announce('There are no train results yet. Say search trains first.', true); return; }
         let index = intent.value === 'first' ? 0 : typeof intent.value === 'number' ? intent.value - 1 : intent.value === 'cheapest' ? list.reduce((best, train, candidate) => fareFor(train, formRef.current.className, formRef.current.passengers) < fareFor(list[best], formRef.current.className, formRef.current.passengers) ? candidate : best, 0) : list.reduce((best, train, candidate) => train.duration < list[best].duration ? candidate : best, 0);
         index = Math.max(0, Math.min(list.length - 1, index));
-        chooseTrain(list[index]);
+        requestTrainSelection(index);
         return;
       }
+      case 'confirm-option': confirmTrainOption(intent.value); return;
       case 'next-option': moveResultSelection(1); return;
       case 'previous-option': moveResultSelection(-1); return;
       case 'next': goNext(); return;
@@ -769,7 +863,7 @@ export function RailwayBookingDemo() {
       case 'close-settings': setSettingsOpen(false); return;
       case 'exit-blind-mode': setBlindMode(false); blindRef.current = false; getVoiceAssistant().disable(); announce('Blind Mode is off. Visual controls are available again.', false); return;
     }
-  }, [announce, chooseTrain, clearBooking, confirmBooking, goBack, goNext, moveResultSelection, readSense, setFlowStep, startSearch, submitPassenger, togglePause, updateForm]);
+  }, [announce, chooseTrain, clearBooking, confirmBooking, confirmTrainOption, goBack, goNext, moveResultSelection, readSense, requestTrainSelection, setFlowStep, startSearch, submitPassenger, togglePause, updateForm]);
 
   voiceIntentRef.current = (text, mode) => {
     setLastTranscript(text);

@@ -16,6 +16,7 @@ export type RailwayVoiceIntent =
   | { type: 'next' }
   | { type: 'back' }
   | { type: 'review' }
+  | { type: 'confirm-option'; value: number }
   | { type: 'confirm' }
   | { type: 'cancel' }
   | { type: 'clear' }
@@ -145,6 +146,11 @@ export function parseRailwayCommand(input: string): RailwayVoiceIntent | null {
   if (/^(back|go back|previous step)$/.test(value)) return { type: 'back' };
   if (/^(next|continue|next step)$/.test(value)) return { type: 'next' };
   if (/^(review|review booking|review form)$/.test(value)) return { type: 'review' };
+  const confirmedOption = value.match(/^(?:confirm|approve) (?:option )?(first|one|second|two|third|three|\d+)$/);
+  if (confirmedOption) {
+    const words: Record<string, number> = { first: 1, one: 1, second: 2, two: 2, third: 3, three: 3 };
+    return { type: 'confirm-option', value: words[confirmedOption[1]] ?? Math.max(1, Number(confirmedOption[1])) };
+  }
   if (/^(confirm|confirm booking|book ticket|approve)$/.test(value)) return { type: 'confirm' };
   if (/^(cancel|cancel booking|stop booking)$/.test(value)) return { type: 'cancel' };
   if (/^(clear|clear form|start again)$/.test(value)) return { type: 'clear' };
