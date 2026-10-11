@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Form
 import type { HandFreeMessage, HandFreeSettings, HandGesture, HandPose, PageNode, RuntimeStatus, TargetInfo } from '../shared/types';
 import { DEFAULT_SETTINGS, DEFAULT_STATUS } from '../shared/types';
 import { Icon } from '../shared/icons';
-import { openDashboardInTab, sendMessage, subscribeToRuntimeMessages } from '../shared/runtime';
+import { extensionUrl, openDashboardInTab, sendMessage, subscribeToRuntimeMessages } from '../shared/runtime';
 import { loadSettings, saveSettings, subscribeToSettings } from '../shared/storage';
 import { formatConfidence, normalizeRuntimeStatus } from '../shared/sessionState';
 import { answerPageQuery, extractPageIndex } from '../accessibility/pageExtractor';
@@ -865,7 +865,7 @@ export function DemoLab() {
     <section ref={demoSurfaceRef} className="demo-page-surface" aria-labelledby="demo-page-title" onScroll={(event) => { const surface = event.currentTarget; const max = Math.max(0, surface.scrollHeight - surface.clientHeight); setScrollPosition(max ? surface.scrollTop / max : 0); }} style={{ opacity: settings.touchViewWebsiteOpacity }}>
       <header className="demo-page-header">
         <div><span className="demo-page-kicker">Interactive webpage</span><h1 id="demo-page-title">Access settings</h1><p>A small real webpage surface for testing pointer movement, target highlighting and dwell activation.</p></div>
-        <button id="demo-primary" type="button" className="demo-page-button demo-page-button--primary" onClick={() => { setFormResult('Primary action activated.'); setFeedback('Primary action activated.'); }}>Activate primary action</button>
+        <div className="demo-page-header__actions"><button id="demo-primary" type="button" className="demo-page-button demo-page-button--primary" onClick={() => { setFormResult('Primary action activated.'); setFeedback('Primary action activated.'); }}>Activate primary action</button><a className="demo-page-button" href={extensionUrl('railway.html')}>Railway booking demo <Icon name="arrow" /></a></div>
       </header>
       <div className="demo-page-grid">
         <article className="demo-control-card">

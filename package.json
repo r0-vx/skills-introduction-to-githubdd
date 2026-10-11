@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:extension": "node scripts/extension-smoke.mjs",
+    "test:railway": "node scripts/railway-smoke.mjs",
     "test:hardware": "node scripts/hardware-probe.mjs"
   },
   "dependencies": {
