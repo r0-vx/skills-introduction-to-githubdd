@@ -67,6 +67,12 @@ try {
   await page.getByRole('heading', { name: 'Book a journey at your own pace.' }).waitFor();
   check('Railway Booking Demo loads in the extension', (await page.title()).includes('Railway Booking Demo'));
   check('local-only simulation warning is visible', (await page.getByText('SIMULATED · LOCAL ONLY').count()) === 1 && (await page.getByText(/No real ticket, payment/).count()) >= 1);
+  const railwayDyslexia = page.getByRole('switch', { name: /Comic Sans font/i });
+  const railwayColourSafe = page.getByRole('switch', { name: /colour-safe UI colours/i });
+  check('Railway demo exposes accessibility controls', await railwayDyslexia.count() === 1 && await railwayColourSafe.count() === 1);
+  await railwayDyslexia.click();
+  await railwayColourSafe.click();
+  check('Railway demo applies Comic Sans and colour-safe UI colours', await page.locator('.railway-app.hf-dyslexia-font').count() === 1 && await page.locator('.railway-app.hf-colorblind-mode').count() === 1 && await railwayDyslexia.getAttribute('aria-checked') === 'true' && await railwayColourSafe.getAttribute('aria-checked') === 'true');
   check('semantic route controls are present', await page.locator('#railway-from').count() === 1 && await page.locator('#railway-to').count() === 1 && await page.locator('#railway-date').count() === 1);
   check('TouchView and Blind Mode controls are visible', await page.locator('#railway-touchview-toggle').count() === 1 && await page.getByRole('button', { name: 'Blind Mode' }).count() === 1);
   await page.locator('#railway-touchview-toggle').click();

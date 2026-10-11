@@ -16,6 +16,7 @@ import { VoiceAssistantControl } from '../voice/VoiceAssistantControl';
 import { getVoiceAssistant } from '../voice/voiceAssistant';
 import { parseVoiceCommand, type VoiceIntent } from '../voice/commandParser';
 import { FistScrollController, type FistScrollEvent } from '../tracking/fistScroll';
+import { AccessibilityControls, accessibilityClassNames } from '../ui/AccessibilityControls';
 
 function targetName(target?: TargetInfo | null): string {
   return target?.accessibleName?.trim() || 'Unnamed control';
@@ -859,7 +860,7 @@ export function DemoLab() {
     ? `${Math.round(settings.calibration.quality * 100)}% quality`
     : 'Fallback map active';
 
-  return <div className="demo-shell" style={{ '--demo-highlight-opacity': settings.touchViewHighlightOpacity } as CSSProperties}>
+  return <div className={`demo-shell ${accessibilityClassNames(settings)}`} style={{ '--demo-highlight-opacity': settings.touchViewHighlightOpacity } as CSSProperties}>
     <video ref={videoRef} className={`demo-camera${settings.mirrorCamera ? ' demo-camera--mirrored' : ''}`} autoPlay muted playsInline aria-label="Live HandFree webcam" style={{ opacity: settings.touchViewCameraOpacity }} />
     <div className="demo-camera-tint" aria-hidden="true" />
     <canvas ref={landmarkCanvasRef} className="demo-landmarks" aria-hidden="true" />
@@ -962,7 +963,7 @@ export function DemoLab() {
     <header className="demo-topbar" data-handfree-chrome="true">
       <div className="demo-brand"><span className="demo-brand-mark"><Icon name="crosshair" /></span><div><strong>HandFree Demo</strong><small>Live camera workspace</small></div></div>
       <div className="demo-topbar-status" aria-live="polite"><StatusBadge label="Camera" value={cameraStatus.value} tone={cameraStatus.tone} /><StatusBadge label="Hand tracking" value={trackingStatus.value} tone={trackingStatus.tone} /><span className="demo-topbar-calibration">Hand calibration · {calibrationLabel}</span></div>
-      <div className="demo-topbar-actions"><button className="demo-icon-button" type="button" aria-label="Open Demo settings" title="Demo settings" onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button><button className="demo-control-button" type="button" onClick={() => void togglePause()} disabled={status.cameraState === 'stopped'}><Icon name={settings.paused ? 'play' : 'pause'} />{settings.paused ? 'Resume' : 'Pause'}</button><button className="demo-control-button demo-control-button--stop" type="button" onClick={() => void stopCamera()} disabled={cameraBusy || status.cameraState === 'stopped'}>Stop camera</button></div>
+      <div className="demo-topbar-actions"><AccessibilityControls compact settings={settings} onSettings={persist} /><button className="demo-icon-button" type="button" aria-label="Open Demo settings" title="Demo settings" onClick={() => setSettingsOpen(true)}><Icon name="settings" /></button><button className="demo-control-button" type="button" onClick={() => void togglePause()} disabled={status.cameraState === 'stopped'}><Icon name={settings.paused ? 'play' : 'pause'} />{settings.paused ? 'Resume' : 'Pause'}</button><button className="demo-control-button demo-control-button--stop" type="button" onClick={() => void stopCamera()} disabled={cameraBusy || status.cameraState === 'stopped'}>Stop camera</button></div>
     </header>
 
     <section className="demo-instructions" data-handfree-chrome="true" aria-label="Demo instructions">

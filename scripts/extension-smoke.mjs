@@ -25,6 +25,13 @@ try {
   await dashboard.goto(`chrome-extension://${id}/dashboard.html`);
   await dashboard.locator('h1').first().waitFor();
   check('extension dashboard loads', (await dashboard.title()).includes('HandFree'));
+  const dashboardDyslexia = dashboard.getByRole('switch', { name: /Comic Sans font/i });
+  const dashboardColourSafe = dashboard.getByRole('switch', { name: /colour-safe UI colours/i });
+  check('dashboard exposes Comic Sans and colour-safe controls', await dashboardDyslexia.count() === 1 && await dashboardColourSafe.count() === 1);
+  await dashboardDyslexia.click();
+  check('dashboard Comic Sans toggle changes only the font preference', await dashboard.locator('.app-shell.hf-dyslexia-font').count() === 1 && await dashboardDyslexia.getAttribute('aria-checked') === 'true');
+  await dashboardColourSafe.click();
+  check('dashboard colour-safe toggle applies a scoped UI palette', await dashboard.locator('.app-shell.hf-colorblind-mode').count() === 1 && await dashboardColourSafe.getAttribute('aria-checked') === 'true' && await dashboard.locator('.app-shell').evaluate(element => getComputedStyle(element).getPropertyValue('--hf-blue').trim()) === '#0072b2');
   check('dashboard exposes the shared-camera Demo Lab transfer', await dashboard.getByRole('button', { name: 'Transfer active camera to Demo Lab' }).count() === 1);
   check('dashboard calibration can be started before the camera is active', await dashboard.getByRole('button', { name: 'Start calibration' }).isEnabled());
   const send = msg => dashboard.evaluate(msg => chrome.runtime.sendMessage(msg), msg);
@@ -174,6 +181,7 @@ try {
   await blocked.goto(`chrome-extension://${id}/demo.html`);
   await blocked.getByText('HandFree Demo').waitFor();
   check('Demo Lab opens as a standalone live workspace', new URL(blocked.url()).pathname.endsWith('/demo.html') && await blocked.getByText('HandFree Demo').count() === 1);
+  check('Demo Lab exposes synchronized accessibility controls', await blocked.getByRole('switch', { name: /Comic Sans font/i }).count() === 1 && await blocked.getByRole('switch', { name: /colour-safe UI colours/i }).count() === 1 && await blocked.locator('.demo-shell.hf-dyslexia-font').count() === 1 && await blocked.locator('.demo-shell.hf-colorblind-mode').count() === 1);
   check('Demo Lab owns a real webcam video surface', await blocked.locator('video.demo-camera').evaluate(video => video.autoplay && video.muted && video.playsInline && video.clientWidth > 0 && video.clientHeight > 0));
   check('Demo Lab gives direct hand-pointer guidance', await blocked.getByText('Move your index finger over a control.').count() === 1 && await blocked.getByText('Keep it still until the dwell ring completes, or make a stable fist to scroll.').count() === 1);
   const demoTopbarText = await blocked.locator('.demo-topbar').innerText();

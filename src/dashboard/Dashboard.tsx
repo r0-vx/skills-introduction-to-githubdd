@@ -18,6 +18,7 @@ import '../ui/touchview-polish.css';
 import { diagnostic } from '../diagnostics/diagnostics';
 import { formatConfidence, normalizeRuntimeStatus, validConfidence } from '../shared/sessionState';
 import { FistScrollController, type FistScrollEvent } from '../tracking/fistScroll';
+import { AccessibilityControls, accessibilityClassNames } from '../ui/AccessibilityControls';
 
 const statusText: Record<RuntimeStatus['trackingPhase'], string> = { idle: 'Not started', 'camera-ready': 'Camera ready', 'loading-model': 'Loading face model', 'face-detected': 'Face detected', 'face-not-detected': 'Face not detected', tracking: 'Tracking', paused: 'Tracking paused', lost: 'Tracking lost', reinitializing: 'Reinitializing tracker', error: 'Tracking error' };
 
@@ -809,7 +810,7 @@ export function Dashboard() {
   const mappingFallbackText = mappingDebug ? `${mappingDebug.fallbackUsed ? 'yes' : 'no'}${mappingDebug.fallbackReason ? ` · ${mappingDebug.fallbackReason}` : ''}` : 'no';
   const targetPointText = calibrationTarget ? `${Math.round(calibrationTarget.x * 100)}%, ${Math.round(calibrationTarget.y * 100)}%` : 'none';
 
-  return <AppShell headerStatus={<><StatusPill label={settings.touchViewEnabled ? settings.touchViewPaused ? 'TouchView paused' : 'TouchView enabled' : 'TouchView off'} tone={settings.touchViewEnabled ? 'good' : 'neutral'} /><StatusPill label={settings.enabledModes.includes('hand') ? `Hand ${handPose === 'fist' ? 'fist ready' : handPose === 'unknown' ? 'waiting' : handPose}` : 'Hand off'} tone={handPose === 'fist' ? 'good' : 'neutral'} /><StatusPill label={status.currentTabSupported ? 'Page supported' : 'Page unsupported'} tone={status.currentTabSupported ? 'good' : 'warn'} /></>}>
+  return <AppShell className={accessibilityClassNames(settings)} topbarControls={<AccessibilityControls settings={settings} onSettings={patch => void persist(patch)} />} headerStatus={<><StatusPill label={settings.touchViewEnabled ? settings.touchViewPaused ? 'TouchView paused' : 'TouchView enabled' : 'TouchView off'} tone={settings.touchViewEnabled ? 'good' : 'neutral'} /><StatusPill label={settings.enabledModes.includes('hand') ? `Hand ${handPose === 'fist' ? 'fist ready' : handPose === 'unknown' ? 'waiting' : handPose}` : 'Hand off'} tone={handPose === 'fist' ? 'good' : 'neutral'} /><StatusPill label={status.currentTabSupported ? 'Page supported' : 'Page unsupported'} tone={status.currentTabSupported ? 'good' : 'warn'} /></>}>
     <main className="dashboard-main">
       <section className="hero"><div><span className="eyebrow">TouchView control center</span><h1>Your hand. Your web.</h1><p>Enable TouchView, keep your hand in view, and calibrate once. Point to a webpage control and pinch or hold to select it.</p></div><div className="status-strip"><StatusPill label={settings.enabled ? 'HandFree on' : 'HandFree off'} tone={settings.enabled ? 'good' : 'neutral'} /><StatusPill label={phase} tone={trackingTone} /></div></section>
       {status.error && <div className="error-banner" role="alert"><Icon name="warning" /><span><strong>{status.diagnostic?.title ?? 'HandFree needs attention'}</strong><span>{status.diagnostic?.explanation ?? status.error}</span>{status.diagnostic?.recovery && <small>{status.diagnostic.recovery}</small>}</span></div>}

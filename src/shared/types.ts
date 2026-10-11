@@ -127,6 +127,8 @@ export interface AnalyticsEvent {
 export interface HandFreeSettings {
   enabled: boolean;
   paused: boolean;
+  dyslexiaFontEnabled: boolean;
+  colorBlindModeEnabled: boolean;
   headControlEnabled: boolean;
   sensitivity: number;
   smoothing: number;
@@ -326,6 +328,8 @@ export type HandFreeMessage =
 export const DEFAULT_SETTINGS: HandFreeSettings = {
   enabled: false,
   paused: false,
+  dyslexiaFontEnabled: false,
+  colorBlindModeEnabled: false,
   headControlEnabled: false,
   sensitivity: 1,
   smoothing: 0.72,

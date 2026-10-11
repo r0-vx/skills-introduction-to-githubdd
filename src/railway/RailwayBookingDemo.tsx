@@ -3,12 +3,13 @@ import type { HandFreeSettings, HandGesture, HandPointerPosition, HandPose, Runt
 import { DEFAULT_SETTINGS, DEFAULT_STATUS } from '../shared/types';
 import { Icon } from '../shared/icons';
 import { extensionUrl, subscribeToRuntimeMessages } from '../shared/runtime';
-import { loadSettings, saveSettings } from '../shared/storage';
+import { loadSettings, saveSettings, subscribeToSettings } from '../shared/storage';
 import { normalizeRuntimeStatus, formatConfidence } from '../shared/sessionState';
 import { SessionManager } from '../session/sessionManager';
 import { CameraOwnership } from '../dashboard/cameraOwnership';
 import { TouchViewEngine, type TouchViewEngineEvent } from '../touchview/touchViewEngine';
 import { FistScrollController, type FistScrollEvent } from '../tracking/fistScroll';
+import { AccessibilityControls, accessibilityClassNames } from '../ui/AccessibilityControls';
 import { getVoiceAssistant } from '../voice/voiceAssistant';
 import type { RecognitionMode, SpeechStatus } from '../voice/speechController';
 import { VoiceAssistantControl } from '../voice/VoiceAssistantControl';
@@ -388,6 +389,11 @@ export function RailwayBookingDemo() {
 
   useEffect(() => {
     let active = true;
+    const unsubscribeSettings = subscribeToSettings((saved) => {
+      if (!active || !mountedRef.current) return;
+      settingsRef.current = saved;
+      setSettings(saved);
+    });
     void loadSettings().then((saved) => {
       if (!active) return;
       settingsRef.current = saved;
@@ -399,7 +405,7 @@ export function RailwayBookingDemo() {
       setHandEnabled(false);
       handRef.current = false;
     });
-    return () => { active = false; };
+    return () => { active = false; unsubscribeSettings(); };
   }, []);
 
   const stopCamera = useCallback(async (disableModes = false) => {
@@ -970,8 +976,8 @@ export function RailwayBookingDemo() {
 
   const renderConfirmed = () => <section className="railway-confirmed" aria-labelledby="confirmed-title"><div className="railway-confirmed-icon" aria-hidden="true"><Icon name="check" /></div><span className="railway-eyebrow">06 · CONFIRMED</span><h2 id="confirmed-title">Your demo booking is complete</h2><p>The local booking flow completed successfully. Nothing was sent outside this browser.</p><div className="railway-reference"><span>Local reference</span><strong>{bookingReference}</strong></div><div className="railway-inline-actions"><button type="button" className="railway-button railway-button--primary" onClick={clearBooking}>Start another demo booking</button><a className="railway-button railway-button--quiet" href={extensionUrl('dashboard.html')}>Return to Control Center</a></div></section>;
 
-  return <div className={`railway-app${settings.touchViewContrast ? ' railway-app--contrast' : ''}`}>
-    <header className="railway-header"><a className="railway-brand" href={extensionUrl('dashboard.html')}><span className="railway-brand-mark"><Icon name="crosshair" /></span><span><strong>HandFree</strong><small>RAILWAY BOOKING DEMO</small></span></a><div className="railway-header-meta"><span className="railway-local-badge">SIMULATED · LOCAL ONLY</span><a href={extensionUrl('demo.html')}>Open Demo Lab</a><a href={extensionUrl('dashboard.html')}>Control Center</a></div></header>
+  return <div className={`railway-app${settings.touchViewContrast ? ' railway-app--contrast' : ''} ${accessibilityClassNames(settings)}`}>
+    <header className="railway-header"><a className="railway-brand" href={extensionUrl('dashboard.html')}><span className="railway-brand-mark"><Icon name="crosshair" /></span><span><strong>HandFree</strong><small>RAILWAY BOOKING DEMO</small></span></a><div className="railway-header-meta"><AccessibilityControls compact settings={settings} onSettings={persistSettings} /><span className="railway-local-badge">SIMULATED · LOCAL ONLY</span><a href={extensionUrl('demo.html')}>Open Demo Lab</a><a href={extensionUrl('dashboard.html')}>Control Center</a></div></header>
     <div className="railway-shell">
       <main className="railway-main" ref={contentRef}>
         <section className="railway-hero"><div><span className="railway-eyebrow">A REALISTIC PRACTICE FLOW</span><h1>Book a journey at your own pace.</h1><p>Use the keyboard, voice, TouchView hand pointer, head dwell or HandFree Sense. Every action below is real inside this local demo, with an explicit approval step before the fictional confirmation.</p></div><div className="railway-hero-status"><span className="status-dot" /><strong>{statusLabel(status)}</strong><small>{notice}</small></div></section>
